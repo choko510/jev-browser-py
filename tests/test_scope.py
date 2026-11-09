@@ -187,9 +187,8 @@ async def test_context_route_blocks_a_real_redirect_to_an_unlisted_origin(
     from jev_browser_py.contracts import NetworkGuardError
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     with fixture_server() as base:
         async with async_playwright() as playwright:
@@ -221,9 +220,8 @@ async def test_context_guard_blocks_unlisted_subresource(
     from playwright.async_api import async_playwright
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     with fixture_server() as base:
         async with async_playwright() as playwright:
@@ -257,9 +255,8 @@ async def test_redirect_to_a_private_host_is_refused_before_navigation(
     from jev_browser_py.contracts import NetworkGuardError
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy(allowed_origins=("https://public.example",))
     assert policy.origin_allowed("https://public.example/start") is True

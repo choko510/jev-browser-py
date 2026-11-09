@@ -50,7 +50,8 @@ class DemoTransport:
             action = next(key for key in criteria if key.startswith("search_"))
         elif self.calls == 2:
             action = next(
-                key for key, description in criteria.items()
+                key
+                for key, description in criteria.items()
                 if key.startswith("submit_") and "submit the search now" in description
             )
         elif self.calls == 3:

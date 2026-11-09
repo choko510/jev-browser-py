@@ -43,6 +43,7 @@ def _form_method_value(method: str) -> Literal["get", "post"] | None:
         return "post"
     return None
 
+
 _JUNK_NAMES = frozenset(
     {
         "jump up",

@@ -80,9 +80,8 @@ def test_network_policy_denies_unlisted_public_hosts(monkeypatch: pytest.MonkeyP
     import socket
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy()
     with pytest.raises(NetworkGuardError) as caught:
@@ -100,9 +99,8 @@ def test_network_policy_allows_only_explicit_public_origins(monkeypatch: pytest.
     import socket
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy(allowed_origins=("https://allowed.example",))
 
@@ -118,9 +116,8 @@ def test_network_policy_rejects_an_allowlisted_hostname_resolving_to_private_ip(
     import socket
 
     def private_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.8", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.8", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", private_dns)
     policy = NetworkPolicy(allowed_origins=("https://api.example",))
 
@@ -131,9 +128,8 @@ def test_network_policy_maps_secure_websockets_to_https_allowlist(monkeypatch: p
     import socket
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy(allowed_origins=("https://allowed.example",))
 
@@ -150,9 +146,8 @@ async def test_context_guard_blocks_unlisted_subresources_and_websockets(
     from fakes import FakePage
 
     def public_dns(*_args, **_kwargs):
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-        ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
 
     class FakeContext:

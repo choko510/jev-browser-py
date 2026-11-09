@@ -85,6 +85,7 @@ def _tokens(text: str) -> set[str]:
     """Content-token overlap for diagnostics only; never a success criterion."""
     return {token for token in _TOKEN.findall(text.lower()) if token not in _STOPWORDS}
 
+
 _ECHO_PATTERNS = (
     re.compile(r'results?\s+for\s+"[^"]{0,200}"', re.IGNORECASE),
     re.compile(r"results?\s+for\s+“[^”]{0,200}”", re.IGNORECASE),
