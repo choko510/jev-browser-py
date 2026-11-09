@@ -1,0 +1,48 @@
+# Paid live smoke: real TypeSafe API, real public site.
+#
+# This workflow is manual-only and requires the TYPESAFE_API_KEY secret. It is
+# split from CI so no pull request can spend money, and so a fork cannot read
+# the secret. It does not assert task success (the public web is not a fixture);
+# it asserts that the run terminates with a classified status and a report.
+name: Live smoke (manual, paid)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Start URL (must be a site you are allowed to automate)
+        required: true
+        default: https://example.com/
+      goal:
+        description: Natural-language goal
+        required: true
+        default: Confirm the page title mentions Example Domain
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m playwright install --with-deps chromium
+      - name: Run one goal with a hard budget
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          START_URL: ${{ inputs.url }}
+          GOAL: ${{ inputs.goal }}
+        run: |
+          python scripts/live_smoke.py "$GOAL" "$START_URL"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-smoke-report
+          path: .artifacts/
