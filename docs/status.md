@@ -31,7 +31,8 @@ python -m ruff check .                       -> All checks passed
 python -m ruff format --check .              -> 37 files already formatted
 python -m mypy src/jev_browser_py            -> Success: no issues found (17 files)
 python -m build                              -> sdist + wheel built after remediation
-clean-venv wheel install/import               -> not re-run after remediation; CI package job is pending
+GitHub CI py3.12/3.13 quality, browser, package -> all jobs passed on head f023b1e
+wheel install/import smoke                     -> passed in the CI package job
 python examples/local_task.py                -> status success, verified True (3 actions)
 python scripts/benchmark.py --iterations 5   -> updated .artifacts/benchmark.json (3 actions)
 ```

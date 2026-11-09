@@ -180,7 +180,8 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | `python -m ruff check .` | clean |
 | `python -m ruff format --check .` | clean (37 files) |
 | `python -m mypy src/jev_browser_py` | clean (17 files) |
-| `python -m build` | sdist + wheel built; clean-venv import awaits the PR CI package job |
+| `python -m build` | sdist + wheel built; CI wheel install/import smoke passed on `f023b1e` |
+| GitHub Actions (py3.12/3.13 quality, browser, package) | all jobs passed on `f023b1e` |
 | `python examples/local_task.py` | `success`, `verified: True` (3 actions) |
 | `python scripts/benchmark.py --iterations 5` | snapshot p50 ≈ 4.5 ms, full local run ≈ 0.52 s (3 actions) |
 
