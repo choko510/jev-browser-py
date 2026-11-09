@@ -18,8 +18,11 @@ Success requires the independent verifier. Nothing else sets `verified=True`.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import math
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +31,7 @@ from .contracts import (
     ActionOutcome,
     ActionOutcomeState,
     ActionProposal,
+    BudgetExceededError,
     CancelledError,
     CancelToken,
     ErrorCode,
@@ -40,6 +44,7 @@ from .contracts import (
     RunLimits,
     RunResult,
     RunStatus,
+    SideEffectClass,
     StaleTargetError,
     StepTrace,
     TransportError,
@@ -53,7 +58,7 @@ from .judgment import (
 )
 from .policy import ActionPolicy, default_policy
 from .questions import build_criteria, judgment_state, select_option_question, step_questions
-from .redaction import Redactor
+from .redaction import Redactor, redact_url_for_model, redact_urls_in_text
 from .snapshot import Snapshotter
 from .transport import JevTransport, TransportReply
 from .typing import TextGenerationError, TextGenerator, is_sensitive_field
@@ -125,6 +130,7 @@ class RunContext:
     executor: Any
     policy: ActionPolicy
     verifier: Verifier
+    cost_budget: _CostBudget
     limits: RunLimits = field(default_factory=RunLimits)
     options: RunOptions = field(default_factory=RunOptions)
     text_generator: TextGenerator | None = None
@@ -135,6 +141,61 @@ class RunContext:
 
 def _clock() -> float:
     return time.monotonic()
+
+
+class _CostBudgetError(RuntimeError):
+    pass
+
+
+@dataclass
+class _CostBudget:
+    limit_usd: float
+    reserved_usd: float = 0.0
+
+    def reserve(self, provider: object, request: Mapping[str, object]) -> float:
+        estimator = getattr(provider, "estimate_max_cost_usd", None)
+        name = str(getattr(provider, "name", getattr(provider, "provider", type(provider).__name__)))
+        if not callable(estimator):
+            raise _CostBudgetError(f"provider {name} has no cost estimator; request was not sent")
+        try:
+            estimate = estimator(request)
+        except Exception as error:
+            raise _CostBudgetError(f"provider {name} cost estimation failed") from error
+        if estimate is None:
+            raise _CostBudgetError(f"provider {name} did not provide a cost estimate; request was not sent")
+        if isinstance(estimate, bool) or not isinstance(estimate, int | float) or not math.isfinite(float(estimate)):
+            raise _CostBudgetError(f"provider {name} returned an invalid cost estimate")
+        estimate = float(estimate)
+        if estimate < 0:
+            raise _CostBudgetError(f"provider {name} returned a negative cost estimate")
+        if self.reserved_usd + estimate > self.limit_usd:
+            raise _CostBudgetError(f"cost budget of ${self.limit_usd:.4f} would be exceeded")
+        self.reserved_usd += estimate
+        return estimate
+
+
+async def _await_before_deadline[T](awaitable: Awaitable[T], deadline: float) -> T:
+    """Return by the run deadline even when a provider ignores its deadline argument."""
+    remaining = deadline - _clock()
+    if remaining <= 0:
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError("run deadline expired")
+    task = asyncio.ensure_future(awaitable)
+    completed, _ = await asyncio.wait((task,), timeout=remaining)
+    if task not in completed:
+        task.cancel()
+        task.add_done_callback(_consume_cancelled_task)
+        raise TimeoutError("run deadline expired")
+    return task.result()
+
+
+def _consume_cancelled_task(task: asyncio.Future[Any]) -> None:
+    if task.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        task.exception()
 
 
 async def _judge(
@@ -148,9 +209,10 @@ async def _judge(
     state = judgment_state(task=context.goal, snapshot=snapshot, history=history)
     criteria = build_criteria(snapshot.action_space)
     questions = step_questions(criteria)
-    reservation = context.limits.max_jev_calls
-    del reservation
-    reply = await context.transport.judge(state=state, questions=questions, deadline=deadline)
+    context.cost_budget.reserve(context.transport, {"state": state, "questions": questions})
+    reply = await _await_before_deadline(
+        context.transport.judge(state=state, questions=questions, deadline=deadline), deadline
+    )
     judgment = validate_step_reply(
         reply,
         action_space=snapshot.action_space,
@@ -173,15 +235,19 @@ async def _judge_select(
     if candidate is None or not candidate.options:
         raise InvalidJudgmentError("select action has no options to choose from")
     question = select_option_question(candidate.description, list(candidate.options))
-    return await context.transport.judge(
-        state={
-            "task": context.goal,
-            "page": {"url": snapshot.url, "title": snapshot.title},
-            "dropdown": candidate.description,
-            "options": list(candidate.options),
+    state = {
+        "task": redact_urls_in_text(context.goal),
+        "page": {
+            "url": redact_url_for_model(snapshot.url),
+            "title": redact_urls_in_text(snapshot.title),
         },
-        questions={"option": question},
-        deadline=deadline,
+        "dropdown": redact_urls_in_text(candidate.description),
+        "options": [redact_urls_in_text(option) for option in candidate.options],
+    }
+    questions = {"option": question}
+    context.cost_budget.reserve(context.transport, {"state": state, "questions": questions})
+    return await _await_before_deadline(
+        context.transport.judge(state=state, questions=questions, deadline=deadline), deadline
     )
 
 
@@ -266,6 +332,7 @@ async def _run_unlocked(
         # would look like protection while leaking everything.
         snapshotter.ensure_secrets(configured_secrets)
     redactor = snapshotter.redactor
+    cost_budget = _CostBudget(resolved_limits.max_cost_usd)
     context = RunContext(
         goal=goal,
         transport=transport,
@@ -273,6 +340,7 @@ async def _run_unlocked(
         executor=executor,
         policy=policy or default_policy(),
         verifier=verifier or RuleBasedVerifier(),
+        cost_budget=cost_budget,
         limits=resolved_limits,
         options=resolved_options,
         text_generator=text_generator,
@@ -304,14 +372,28 @@ async def _run_unlocked(
             verified=verified,
             steps=actions_taken,
             usage=usage,
+            estimated_cost_usd=cost_budget.reserved_usd,
             jev_calls=jev_calls,
             elapsed_seconds=max(0.0, _clock() - started),
-            final_url=last_snapshot.url if last_snapshot else "",
+            final_url=redact_url_for_model(last_snapshot.url) if last_snapshot else "",
             final_snapshot_id=last_snapshot.snapshot_id if last_snapshot else None,
             evidence=evidence,
             trace=tuple(trace),
             error_code=error_code,
         )
+
+    page = getattr(snapshotter, "page", None)
+    if page is None:
+        page = getattr(executor, "page", None)
+    if page is not None and getattr(page, "context", None) is not None:
+        from .session import _network_policy_for_page
+
+        if _network_policy_for_page(page) is None:
+            return _result(
+                RunStatus.BLOCKED,
+                "a guarded BrowserSession is required for a Playwright Page",
+                error_code=ErrorCode.NETWORK_BLOCKED,
+            )
 
     def _stop_after_wait() -> RunResult | None:
         if context.cancel_token is not None and context.cancel_token.cancelled:
@@ -355,16 +437,16 @@ async def _run_unlocked(
                 f"action budget of {resolved_limits.max_actions_per_run} exhausted",
                 error_code=ErrorCode.BUDGET_EXCEEDED,
             )
-        if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
-            return _result(
-                RunStatus.BUDGET_EXCEEDED,
-                f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
-                error_code=ErrorCode.BUDGET_EXCEEDED,
-            )
 
         # ── Observe ─────────────────────────────────────────────────────────
         try:
-            snapshot = await snapshotter.observe()
+            snapshot = await _await_before_deadline(snapshotter.observe(), deadline)
+        except TimeoutError:
+            return _result(
+                RunStatus.TIMEOUT,
+                "snapshot observation exceeded the run deadline",
+                error_code=ErrorCode.TIMEOUT,
+            )
         except NetworkGuardError as error:
             return _result(RunStatus.BLOCKED, error.message, error_code=error.code)
         except CancelledError:
@@ -393,6 +475,8 @@ async def _run_unlocked(
                 input_tokens=usage.input_tokens + judgment.usage.input_tokens,
                 output_tokens=usage.output_tokens + judgment.usage.output_tokens,
             )
+        except _CostBudgetError as error:
+            return _result(RunStatus.BUDGET_EXCEEDED, str(error), error_code=ErrorCode.BUDGET_EXCEEDED)
         except TransportError as error:
             return _result(RunStatus.ERROR, error.message, error_code=ErrorCode.TRANSPORT_FAILED)
         except TimeoutError:
@@ -425,20 +509,19 @@ async def _run_unlocked(
             )
         )
 
-        if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
-            trace[-1] = trace[-1].model_copy(
-                update={"outcome": "budget_exceeded", "detail": "model cost limit reached"}
-            )
-            return _result(
-                RunStatus.BUDGET_EXCEEDED,
-                f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
-                error_code=ErrorCode.BUDGET_EXCEEDED,
-            )
-
         # ── Stop gates, before any action is considered ─────────────────────
         baseline = first_snapshot or snapshot
         if proposal.is_done():
-            verified, detail, evidence = await _verify(context, goal=goal, before=baseline, after=snapshot)
+            try:
+                verified, detail, evidence = await _await_before_deadline(
+                    _verify(context, goal=goal, before=baseline, after=snapshot), deadline
+                )
+            except TimeoutError:
+                return _result(
+                    RunStatus.TIMEOUT,
+                    "verification exceeded the run deadline",
+                    error_code=ErrorCode.TIMEOUT,
+                )
             trace[-1] = trace[-1].model_copy(update={"outcome": "done proposed", "detail": detail})
             return _result(
                 RunStatus.SUCCESS if verified else RunStatus.UNVERIFIED,
@@ -447,7 +530,16 @@ async def _run_unlocked(
                 evidence=evidence,
             )
         if judgment.goal_done > resolved_options.done_threshold:
-            verified, detail, evidence = await _verify(context, goal=goal, before=baseline, after=snapshot)
+            try:
+                verified, detail, evidence = await _await_before_deadline(
+                    _verify(context, goal=goal, before=baseline, after=snapshot), deadline
+                )
+            except TimeoutError:
+                return _result(
+                    RunStatus.TIMEOUT,
+                    "verification exceeded the run deadline",
+                    error_code=ErrorCode.TIMEOUT,
+                )
             trace[-1] = trace[-1].model_copy(update={"outcome": "goal_done proposed", "detail": detail})
             return _result(
                 RunStatus.SUCCESS if verified else RunStatus.UNVERIFIED,
@@ -476,7 +568,16 @@ async def _run_unlocked(
             )
 
         # ── Policy ──────────────────────────────────────────────────────────
-        decision = await context.policy.authorize(proposal=proposal, snapshot=snapshot)
+        try:
+            decision = await _await_before_deadline(
+                context.policy.authorize(proposal=proposal, snapshot=snapshot), deadline
+            )
+        except TimeoutError:
+            return _result(
+                RunStatus.TIMEOUT,
+                "policy authorization exceeded the run deadline",
+                error_code=ErrorCode.TIMEOUT,
+            )
         if not decision.allowed:
             trace[-1] = trace[-1].model_copy(update={"outcome": "policy_denied", "detail": decision.reason})
             return _result(
@@ -487,12 +588,6 @@ async def _run_unlocked(
         stop_result = _stop_after_wait()
         if stop_result is not None:
             return stop_result
-        if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
-            return _result(
-                RunStatus.BUDGET_EXCEEDED,
-                f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
-                error_code=ErrorCode.BUDGET_EXCEEDED,
-            )
 
         # Native-select option choice is a second Jev call and consumes the same
         # call, token, cost, cancellation, and wall-clock budgets as the primary
@@ -525,6 +620,9 @@ async def _run_unlocked(
                         input_tokens=usage.input_tokens + select_reply.input_tokens,
                         output_tokens=usage.output_tokens + select_reply.output_tokens,
                     )
+                except _CostBudgetError as error:
+                    jev_calls -= 1
+                    return _result(RunStatus.BUDGET_EXCEEDED, str(error), error_code=ErrorCode.BUDGET_EXCEEDED)
                 except TransportError as error:
                     return _result(RunStatus.ERROR, error.message, error_code=ErrorCode.TRANSPORT_FAILED)
                 except TimeoutError:
@@ -548,12 +646,6 @@ async def _run_unlocked(
                 stop_result = _stop_after_wait()
                 if stop_result is not None:
                     return stop_result
-                if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
-                    return _result(
-                        RunStatus.BUDGET_EXCEEDED,
-                        f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
-                        error_code=ErrorCode.BUDGET_EXCEEDED,
-                    )
         else:
             prep_error = None
 
@@ -561,12 +653,22 @@ async def _run_unlocked(
             trace[-1] = trace[-1].model_copy(update={"outcome": "input_unavailable", "detail": prep_error})
             return _result(RunStatus.NEEDS_HUMAN, prep_error, error_code=ErrorCode.NEEDS_HUMAN)
 
-        typed_text, select_index, prep_error = await _prepare_action_input(
-            context=context,
-            proposal=proposal,
-            snapshot=snapshot,
-            select_option_index=select_index,
-        )
+        try:
+            typed_text, select_index, prep_error = await _prepare_action_input(
+                context=context,
+                proposal=proposal,
+                snapshot=snapshot,
+                select_option_index=select_index,
+                deadline=deadline,
+            )
+        except _CostBudgetError as error:
+            return _result(RunStatus.BUDGET_EXCEEDED, str(error), error_code=ErrorCode.BUDGET_EXCEEDED)
+        except TimeoutError:
+            return _result(
+                RunStatus.TIMEOUT,
+                "input preparation exceeded the run deadline",
+                error_code=ErrorCode.TIMEOUT,
+            )
         if prep_error is not None:
             trace[-1] = trace[-1].model_copy(update={"outcome": "input_unavailable", "detail": prep_error})
             return _result(RunStatus.NEEDS_HUMAN, prep_error, error_code=ErrorCode.NEEDS_HUMAN)
@@ -577,7 +679,13 @@ async def _run_unlocked(
         live_snapshot = snapshot
         if proposal.candidate is not None:
             try:
-                live_snapshot = await snapshotter.observe()
+                live_snapshot = await _await_before_deadline(snapshotter.observe(), deadline)
+            except TimeoutError:
+                return _result(
+                    RunStatus.TIMEOUT,
+                    "live target observation exceeded the run deadline; no action was executed",
+                    error_code=ErrorCode.TIMEOUT,
+                )
             except Exception as error:  # noqa: BLE001 - current target must be observable to act
                 trace[-1] = trace[-1].model_copy(
                     update={"outcome": "stale", "detail": "live target could not be re-observed"}
@@ -607,13 +715,31 @@ async def _run_unlocked(
 
         # ── Act ─────────────────────────────────────────────────────────────
         try:
-            outcome = await context.executor.execute_one(
-                proposal=proposal,
-                snapshot=snapshot,
-                current_snapshot=live_snapshot,
-                typed_text=typed_text,
-                select_option_index=select_index,
+            from .session import _authorize_unsafe_requests_for_page
+
+            allow_unsafe_requests = decision.allowed and proposal.side_effect in (
+                SideEffectClass.EXTERNAL_WRITE,
+                SideEffectClass.AMBIGUOUS,
             )
+            with _authorize_unsafe_requests_for_page(page, allowed=allow_unsafe_requests):
+                outcome = await _await_before_deadline(
+                    context.executor.execute_one(
+                        proposal=proposal,
+                        snapshot=snapshot,
+                        current_snapshot=live_snapshot,
+                        typed_text=typed_text,
+                        select_option_index=select_index,
+                    ),
+                    deadline,
+                )
+        except TimeoutError:
+            if proposal.side_effect in {SideEffectClass.EXTERNAL_WRITE, SideEffectClass.AMBIGUOUS}:
+                return _result(
+                    RunStatus.UNKNOWN_EFFECT,
+                    "an authorized write action timed out; its effect is unknown and will not be retried",
+                    error_code=ErrorCode.UNKNOWN_EFFECT,
+                )
+            return _result(RunStatus.TIMEOUT, "the action exceeded the run deadline", error_code=ErrorCode.TIMEOUT)
         except StaleTargetError as error:
             trace[-1] = trace[-1].model_copy(update={"outcome": "stale", "detail": error.message})
             return _result(
@@ -669,7 +795,13 @@ async def _run_unlocked(
 
         # ── Re-observe, then let the verifier have the last word ────────────
         try:
-            after = await snapshotter.observe(bump=True)
+            after = await _await_before_deadline(snapshotter.observe(bump=True), deadline)
+        except TimeoutError:
+            return _result(
+                RunStatus.UNKNOWN_EFFECT,
+                "the run deadline expired after acting; the result could not be observed",
+                error_code=ErrorCode.UNKNOWN_EFFECT,
+            )
         except Exception:  # noqa: BLE001 - post-action observation is terminal
             return _result(
                 RunStatus.UNKNOWN_EFFECT,
@@ -677,7 +809,16 @@ async def _run_unlocked(
                 error_code=ErrorCode.UNKNOWN_EFFECT,
             )
         last_snapshot = after
-        verified, detail, evidence = await _verify(context, goal=goal, before=snapshot, after=after)
+        try:
+            verified, detail, evidence = await _await_before_deadline(
+                _verify(context, goal=goal, before=snapshot, after=after), deadline
+            )
+        except TimeoutError:
+            return _result(
+                RunStatus.TIMEOUT,
+                "verification exceeded the run deadline; the action was not declared successful",
+                error_code=ErrorCode.TIMEOUT,
+            )
         if verified:
             return _result(
                 RunStatus.SUCCESS,
@@ -719,6 +860,7 @@ async def _prepare_action_input(
     proposal: ActionProposal,
     snapshot: PageSnapshot,
     select_option_index: int | None = None,
+    deadline: float,
 ) -> tuple[str | None, int | None, str | None]:
     """Prepare typed text after any budgeted select judgment has completed.
 
@@ -762,12 +904,18 @@ async def _prepare_action_input(
             None,
             "no text generator is configured; an ordinary field is left empty rather than guessed",
         )
+    cost_request = {
+        "task": redact_urls_in_text(context.goal),
+        "element_description": redact_urls_in_text(candidate.description),
+        "url": redact_url_for_model(snapshot.url),
+    }
+    context.cost_budget.reserve(context.text_generator, cost_request)
     try:
-        generated = await context.text_generator.generate(
-            task=context.goal,
-            element_description=candidate.description,
-            url=snapshot.url,
+        generated = await _await_before_deadline(
+            context.text_generator.generate(**cost_request, deadline=deadline), deadline
         )
+    except TimeoutError:
+        raise
     except TextGenerationError as error:
         if candidate.kind.value == "search":
             from .typing import heuristic_query
@@ -788,6 +936,7 @@ async def suggest_next_action(
     transport: JevTransport,
     goal_revision: int = 0,
     deadline: float | None = None,
+    max_cost_usd: float = 0.25,
 ) -> ActionProposal:
     """Judgment-only helper: propose one action without touching a page.
 
@@ -797,8 +946,15 @@ async def suggest_next_action(
     if deadline is None:
         deadline = _clock() + 30.0
     state = judgment_state(task=goal, snapshot=snapshot, history=[])
-    criteria = build_criteria(snapshot.action_space)
-    reply = await transport.judge(state=state, questions=step_questions(criteria), deadline=deadline)
+    questions = step_questions(build_criteria(snapshot.action_space))
+    cost_budget = _CostBudget(max_cost_usd)
+    try:
+        cost_budget.reserve(transport, {"state": state, "questions": questions})
+    except _CostBudgetError as error:
+        raise BudgetExceededError(str(error)) from error
+    reply = await _await_before_deadline(
+        transport.judge(state=state, questions=questions, deadline=deadline), deadline
+    )
     judgment = validate_step_reply(
         reply,
         action_space=snapshot.action_space,

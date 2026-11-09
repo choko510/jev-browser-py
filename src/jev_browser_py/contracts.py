@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 __all__ = [
+    "TYPE_SAFE_INPUT_USD_PER_MTOK",
     "ActionCandidate",
     "ActionKind",
     "ActionOutcome",
@@ -218,13 +219,16 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
+TYPE_SAFE_INPUT_USD_PER_MTOK = 0.042
+
+
 class Usage(StrictModel):
     """Token accounting reported by the judgment provider."""
 
     input_tokens: NonNegativeInt = 0
     output_tokens: NonNegativeInt = 0
 
-    def estimated_cost_usd(self, price_per_mtok_input: float = 0.042) -> float:
+    def estimated_cost_usd(self, price_per_mtok_input: float = TYPE_SAFE_INPUT_USD_PER_MTOK) -> float:
         """Published jev input pricing is $0.042/M tokens; output tokens are free."""
         return (self.input_tokens / 1_000_000.0) * price_per_mtok_input
 
@@ -451,6 +455,7 @@ class RunResult(StrictModel):
     verified: bool = False
     steps: int = Field(default=0, ge=0)
     usage: Usage = Usage()
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
     jev_calls: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0.0, ge=0)
     final_url: str = ""

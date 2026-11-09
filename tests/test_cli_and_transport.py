@@ -21,9 +21,51 @@ def test_parser_defaults_are_conservative() -> None:
     assert args.allow_external_write is False
     assert args.allow_ambiguous is False
     assert args.allow_private is False
+    assert args.typing_max_cost_per_call is None
     assert args.headless is True
     assert args.max_steps == 12
     assert args.out is None
+
+
+def test_browser_install_path_expands_tilde(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from conftest import browser_install_path
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "~/.cache/ms-playwright")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert browser_install_path() == tmp_path / ".cache" / "ms-playwright"
+
+
+def test_required_browser_suite_has_no_skip_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from conftest import browser_test_marks
+
+    monkeypatch.setenv("JEV_REQUIRE_BROWSER_TESTS", "1")
+    assert [mark.name for mark in browser_test_marks()] == ["browser"]
+
+
+def test_required_browser_session_fails_if_all_items_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import conftest
+
+    monkeypatch.setenv("JEV_REQUIRE_BROWSER_TESTS", "1")
+    monkeypatch.setattr(conftest, "_BROWSER_REQUIRED_PASSES", 0)
+    session = SimpleNamespace(
+        config=SimpleNamespace(getoption=lambda name: "browser"),
+        exitstatus=pytest.ExitCode.OK,
+    )
+
+    conftest.pytest_sessionfinish(session, pytest.ExitCode.OK)
+
+    assert session.exitstatus is pytest.ExitCode.TESTS_FAILED
+
+
+def test_typing_cost_upper_bound_is_configurable() -> None:
+    args = build_parser().parse_args(
+        ["g", "--url", "https://x/", "--typing-base-url", "http://localhost:11434/v1",
+         "--typing-model", "local", "--typing-max-cost-per-call", "0"]
+    )
+    assert args.typing_max_cost_per_call == 0.0
 
 
 def test_headless_can_be_disabled_explicitly() -> None:
@@ -58,6 +100,20 @@ def test_selector_spec_requires_a_css_part() -> None:
 def test_extract_flag_is_repeatable() -> None:
     args = build_parser().parse_args(["g", "--url", "https://x/", "--extract", "a=a", "--extract", "b=b"])
     assert args.extract == ["a=a", "b=b"]
+
+
+def test_typesafe_cost_estimator_includes_prompt_overhead() -> None:
+    from jev_browser_py.contracts import TYPE_SAFE_INPUT_USD_PER_MTOK
+    from jev_browser_py.transport import TypeSafeTransport
+
+    request = {"state": {"task": "find"}, "questions": {}}
+    base = TypeSafeTransport(prompt_overhead_bytes=0).estimate_max_cost_usd(request)
+    with_overhead = TypeSafeTransport(prompt_overhead_bytes=100).estimate_max_cost_usd(request)
+
+    assert base is not None
+    assert with_overhead is not None
+    assert with_overhead - base == pytest.approx(100 * TYPE_SAFE_INPUT_USD_PER_MTOK / 1_000_000)
+    assert TypeSafeTransport(prompt_overhead_bytes=-1).estimate_max_cost_usd(request) is None
 
 
 # ── transport normalization ─────────────────────────────────────────────────

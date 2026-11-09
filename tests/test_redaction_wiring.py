@@ -81,6 +81,61 @@ def test_snapshotter_registers_and_verifies_secrets() -> None:
     assert "another-secret-value" not in snapshotter.redactor.redact("x another-secret-value y")
 
 
+def test_snapshotter_masks_unknown_url_tokens_in_page_and_link_values() -> None:
+    from fakes import FakePage
+    from jev_browser_py.action_space import RawElement
+
+    secret = "unknown-auth-token-abcdef1234567890"
+    snapshotter = Snapshotter(FakePage())
+    safe_url = snapshotter._redact(f"https://example.test/callback?opaque={secret}#token={secret}")
+    element = RawElement(
+        attr="j1",
+        tag="a",
+        role="a",
+        text=f"Open https://example.test/?unknown={secret}",
+        href=f"/account/{secret}?opaque={secret}",
+        clickable=True,
+    )
+
+    safe_element = snapshotter._redact_element(element)
+
+    assert secret not in safe_url
+    assert secret not in safe_element.text
+    assert secret not in safe_element.href
+
+
+def test_model_state_sanitizes_urls_from_task_history_snapshot_and_criteria() -> None:
+    from jev_browser_py.action_space import RawElement, build_action_space
+    from jev_browser_py.questions import build_criteria, judgment_state, select_option_question
+
+    path_token = "opaque-path-auth-0123456789abcdefghijkl"
+    query_token = "unknown-query-token-abcdef"
+    fragment_token = "unknown-fragment-token-abcdef"
+    url = f"https://example.test/account/{path_token}?mystery={query_token}#state={fragment_token}"
+    element = RawElement(
+        attr="j1",
+        tag="a",
+        role="link",
+        text=f"Open {url}",
+        href=url,
+        clickable=True,
+    )
+    action_space = build_action_space([element])
+    snapshot = make_snapshot(url=url, excerpt=f"Current URL: {url}", action_space=action_space)
+    state = judgment_state(
+        task=f"open {url}",
+        snapshot=snapshot,
+        history=[{"outcome": f"retried /callback?auth={query_token}#{fragment_token}"}],
+    )
+    criteria = build_criteria(action_space)
+    select_question = select_option_question(f"choose from {url}", [url])
+    model_payload = str((state, criteria, select_question))
+
+    for secret in (path_token, query_token, fragment_token):
+        assert secret not in model_payload
+    assert "example.test" in model_payload
+
+
 def test_snapshotter_rejects_an_unregisterable_secret() -> None:
     from fakes import FakePage
 
@@ -94,6 +149,27 @@ def test_snapshotter_built_with_secrets_redacts_them() -> None:
 
     snapshotter = Snapshotter(FakePage(), secrets=["a-secret-token"])
     assert snapshotter.redactor.redact("value a-secret-token") == "value [REDACTED]"
+
+
+async def test_run_sanitizes_urls_before_text_generation() -> None:
+    from fakes import FakeExecutor, FakeSnapshotter, RecordingTextGenerator
+
+    secret = "unknown-task-url-token-abcdef123456"
+    url = f"https://example.test/search?mystery={secret}#session={secret}"
+    action_space = sample_action_space()
+    generator = RecordingTextGenerator()
+    result = await run(
+        f"type a query for {url}",
+        transport=MockTransport([step_reply(action_space, "type_e5")]),
+        snapshotter=FakeSnapshotter([make_snapshot(url=url, action_space=action_space)]),
+        executor=FakeExecutor(),
+        text_generator=generator,
+        limits=RunLimits(max_steps=1, max_jev_calls=1),
+    )
+
+    assert generator.calls
+    assert secret not in str(generator.calls)
+    assert result.status is not RunStatus.SUCCESS
 
 
 async def test_run_still_reports_a_result_with_secrets_configured() -> None:

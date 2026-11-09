@@ -11,7 +11,7 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Iterable, Mapping
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, unquote, urlsplit, urlunsplit
 
 from .contracts import RedactionStatus
 
@@ -22,6 +22,8 @@ __all__ = [
     "Redactor",
     "build_redactor",
     "detect_secret_markers",
+    "redact_url_for_model",
+    "redact_urls_in_text",
 ]
 
 REDACTED = "[REDACTED]"
@@ -51,6 +53,9 @@ SECRET_QUERY_KEYS = (
 
 _PII_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,80}\.[A-Za-z]{2,12}")
 _PII_CARD = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+_URL_IN_TEXT = re.compile(r"""(?i)\b(?:https?|wss?)://[^\s<>\"']+""")
+_OPAQUE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]{24,}$")
+
 _SECRET_MARKERS = (
     "password",
     "passwd",
@@ -64,6 +69,13 @@ _SECRET_MARKERS = (
     "sessionid",
     "csrf",
     "bearer",
+)
+
+
+_QUERY_PARAMETER_IN_TEXT = re.compile(r"(?i)[?&][A-Za-z0-9_.~-]+=[^\\s<>\"']+")
+_FRAGMENT_PARAMETER_IN_TEXT = re.compile(r"(?i)#[A-Za-z0-9_.~-]+=[^\\s<>\"']+|#[A-Za-z0-9_-]{24,}")
+_OPAQUE_RELATIVE_PATH_IN_TEXT = re.compile(
+    r"(?<![\\w/])/(?:[A-Za-z0-9._~%-]*/)*[A-Za-z0-9._~%-]{24,}(?:/[A-Za-z0-9._~%-]*)*(?:[?#][^\\s<>\"']*)?"
 )
 
 
@@ -179,6 +191,56 @@ def detect_secret_markers(text: str) -> tuple[str, ...]:
     """
     lowered = text.lower()
     return tuple(marker for marker in _SECRET_MARKERS if marker in lowered)
+
+
+def redact_url_for_model(url: str) -> str:
+    """Mask all URL credentials/query/fragment and opaque path tokens before model use.
+
+    Query names and values are both removed because authentication keys are not
+    reliably known ahead of time. Long opaque path segments are masked as a
+    conservative heuristic; configured secrets are still applied separately.
+    """
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return REDACTED
+    scheme = parts.scheme.lower()
+    if scheme and scheme not in {"http", "https", "ws", "wss"}:
+        if scheme == "about" and parts.path == "blank":
+            return "about:blank"
+        return f"{scheme}:{REDACTED}"
+    netloc = ""
+    if parts.netloc:
+        if not hostname:
+            return REDACTED
+        netloc = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+    path_parts = []
+    for segment in parts.path.split("/"):
+        decoded = unquote(segment)
+        path_parts.append(REDACTED if _OPAQUE_PATH_SEGMENT.fullmatch(decoded) else segment)
+    safe_path = "/".join(path_parts)
+    safe_query = REDACTED if parts.query else ""
+    return urlunsplit((scheme, netloc, safe_path, safe_query, ""))
+
+
+def redact_urls_in_text(text: str) -> str:
+    """Sanitize absolute and token-bearing relative URLs in visible model text."""
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        trailing = ""
+        while raw and raw[-1] in ".,;:!?)]}>":
+            trailing = raw[-1] + trailing
+            raw = raw[:-1]
+        return redact_url_for_model(raw) + trailing
+
+    safe = _URL_IN_TEXT.sub(replace, text)
+    safe = _OPAQUE_RELATIVE_PATH_IN_TEXT.sub(replace, safe)
+    safe = _QUERY_PARAMETER_IN_TEXT.sub(lambda match: match.group(0)[0] + REDACTED, safe)
+    return _FRAGMENT_PARAMETER_IN_TEXT.sub(f"#{REDACTED}", safe)
 
 
 def redact_query_string(url: str) -> str:

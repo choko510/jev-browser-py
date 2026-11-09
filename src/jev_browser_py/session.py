@@ -24,7 +24,7 @@ import ipaddress
 import socket
 import threading
 import weakref
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -45,7 +45,7 @@ __all__ = [
 ]
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
+_SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _DEFAULT_ALLOWED_SCHEMES = frozenset({"http", "https", "ws", "wss", "about", "data", "blob"})
 
 
@@ -59,17 +59,23 @@ class NetworkPolicy:
     than followed. Use real isolation (container, proxy, or host firewall)
     before exposing the library to untrusted tasks on the public internet.
 
-    Defaults are intentionally restrictive: loopback fixtures are allowed,
-    arbitrary internet hosts are allowed only when explicitly listed.
+    Loopback and private network access are not implicit. An exact loopback
+    origin may be explicitly allow-listed; `allow_loopback=True` and
+    `allow_private=True` are broader explicit opt-ins. Unsafe HTTP methods are
+    blocked unless enabled, and then only while an allowed write action is
+    actively executing.
     """
 
     allowed_origins: tuple[str, ...] = ()
     allowed_hosts: tuple[str, ...] = ()
-    allow_loopback: bool = True
+    allow_loopback: bool = False
     allow_private: bool = False
+    allow_unsafe_methods: bool = False
     allowed_schemes: frozenset[str] = _DEFAULT_ALLOWED_SCHEMES
     block_downloads: bool = True
     block_new_tabs: bool = False
+    _unsafe_pages: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _unsafe_pages_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalized = []
@@ -98,13 +104,40 @@ class NetworkPolicy:
         host = (parts.hostname or "").lower()
         if not host:
             return False
-        if self.allow_loopback and host in LOCAL_HOSTS:
-            return True
-        if is_private_host(host):
-            return self.allow_private
         origin_scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
         origin = f"{origin_scheme}://{parts.netloc}".lower()
-        return origin in self.allowed_origins or host in self.allowed_hosts
+        explicitly_allowed = origin in self.allowed_origins or host in self.allowed_hosts
+        if host in LOCAL_HOSTS:
+            return explicitly_allowed or self.allow_loopback
+        if is_private_host(host):
+            return self.allow_private
+        return explicitly_allowed
+
+    @contextlib.contextmanager
+    def authorize_unsafe_requests(self, page: Any) -> Iterator[None]:
+        """Scope unsafe HTTP methods to one caller-approved Page action."""
+        if not self.allow_unsafe_methods:
+            raise NetworkGuardError("unsafe HTTP methods are disabled by the network policy")
+        key = id(page)
+        with self._unsafe_pages_lock:
+            self._unsafe_pages[key] = self._unsafe_pages.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            with self._unsafe_pages_lock:
+                remaining = self._unsafe_pages.get(key, 0) - 1
+                if remaining > 0:
+                    self._unsafe_pages[key] = remaining
+                else:
+                    self._unsafe_pages.pop(key, None)
+
+    def request_method_allowed(self, method: str, page: Any | None) -> bool:
+        if method.upper() in _SAFE_HTTP_METHODS:
+            return True
+        if not self.allow_unsafe_methods or page is None:
+            return False
+        with self._unsafe_pages_lock:
+            return self._unsafe_pages.get(id(page), 0) > 0
 
     def check(self, url: str) -> None:
         if not self.origin_allowed(url):
@@ -204,6 +237,7 @@ async def _safe_abort(route: Any) -> None:
 
 
 _PAGE_LOCKS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Lock]] = {}
+_PAGE_NETWORK_POLICIES: dict[int, tuple[weakref.ReferenceType[Any], NetworkPolicy]] = {}
 _PAGE_LOCKS_GUARD = threading.RLock()
 
 
@@ -212,6 +246,44 @@ def _forget_page_lock(key: int, reference: weakref.ReferenceType[Any]) -> None:
         current = _PAGE_LOCKS.get(key)
         if current is not None and current[0] is reference:
             del _PAGE_LOCKS[key]
+
+
+def _forget_page_network_policy(key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_NETWORK_POLICIES.get(key)
+        if current is not None and current[0] is reference:
+            del _PAGE_NETWORK_POLICIES[key]
+
+
+def _register_page_network_policy(page: Any, policy: NetworkPolicy) -> None:
+    key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_NETWORK_POLICIES.get(key)
+        if current is not None and current[0]() is page:
+            if current[1] is not policy:
+                raise NetworkGuardError("a different network policy is already attached to this Page")
+            return
+        reference = weakref.ref(page, lambda ref: _forget_page_network_policy(key, ref))
+        _PAGE_NETWORK_POLICIES[key] = (reference, policy)
+
+
+def _network_policy_for_page(page: Any) -> NetworkPolicy | None:
+    key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_NETWORK_POLICIES.get(key)
+        if current is not None and current[0]() is page:
+            return current[1]
+    return None
+
+
+@contextlib.contextmanager
+def _authorize_unsafe_requests_for_page(page: Any, *, allowed: bool) -> Iterator[None]:
+    policy = _network_policy_for_page(page)
+    if allowed and policy is not None and policy.allow_unsafe_methods:
+        with policy.authorize_unsafe_requests(page):
+            yield
+    else:
+        yield
 
 
 def _page_action_lock(page: Any) -> asyncio.Lock:
@@ -248,6 +320,12 @@ class BrowserSession:
         """Shared Page lock; `run()` acquires it automatically for the whole run."""
         return self._lock
 
+    @contextlib.contextmanager
+    def authorize_unsafe_requests(self) -> Iterator[None]:
+        """Explicitly authorize unsafe HTTP methods during one manual action."""
+        with self.network.authorize_unsafe_requests(self.page):
+            yield
+
     async def navigate(self, url: str, *, timeout_ms: int = 15_000) -> None:
         """Navigate under the network policy, never bypassing it."""
         self.network.check(url)
@@ -262,8 +340,10 @@ class BrowserSession:
         """Install awaited context-wide HTTP and WebSocket policy routes.
 
         The guard is installed before any owned-page navigation and applies to
-        every HTTP resource type and popup in the Context. Redirect responses
-        are blocked because Playwright does not re-run the route handler for
+        every observed HTTP resource type and popup in the Context. Unsafe HTTP
+        methods require both `allow_unsafe_methods=True` and an active authorized
+        write action for the request's Page. Redirect responses are blocked because
+        Playwright does not re-run the route handler for
         every server redirect hop. Playwright also has no API to remove
         WebSocket routes; on an injected Context this policy remains attached
         until the caller closes that Context. This is not an egress firewall.
@@ -278,8 +358,15 @@ class BrowserSession:
 
         async def _route_handler(route: Any) -> None:
             try:
-                request_url = str(getattr(route.request, "url", "") or "")
+                request = route.request
+                request_url = str(getattr(request, "url", "") or "")
+                request_method = str(getattr(request, "method", "GET") or "GET").upper()
+                frame = getattr(request, "frame", None)
+                request_page = getattr(frame, "page", None) if frame is not None else None
             except Exception:  # noqa: BLE001 - a torn-down request
+                await _safe_abort(route)
+                return
+            if not policy.request_method_allowed(request_method, request_page):
                 await _safe_abort(route)
                 return
             try:
@@ -320,8 +407,12 @@ class BrowserSession:
             await route.connect()
 
         try:
+            existing_policy = _network_policy_for_page(self.page)
+            if existing_policy is not None and existing_policy is not policy:
+                raise NetworkGuardError("a different network policy is already attached to this Page")
             await websocket_route("**/*", _websocket_handler)
             await context.route("**/*", _route_handler)
+            _register_page_network_policy(self.page, policy)
         except Exception as error:
             raise NetworkGuardError("the browser network guard could not be installed") from error
 
@@ -462,10 +553,10 @@ def summarize_session(session: BrowserSession) -> dict[str, Any]:
 
 
 def safe_url(url: Any) -> str:
-    from .redaction import redact_query_string
+    from .redaction import redact_url_for_model
 
     text = url() if callable(url) else str(url or "")
-    return redact_query_string(text)
+    return redact_url_for_model(text)
 
 
 def private_hosts_in(urls: Sequence[str]) -> tuple[str, ...]:

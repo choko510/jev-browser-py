@@ -136,7 +136,19 @@ class RecordingTextGenerator:
     calls: list[tuple[str, str, str]] = field(default_factory=list)
     provider: str = "recording"
 
-    async def generate(self, *, task: str, element_description: str, url: str) -> GeneratedText:
+    def estimate_max_cost_usd(self, request: dict[str, object]) -> float:
+        del request
+        return 0.0
+
+    async def generate(
+        self,
+        *,
+        task: str,
+        element_description: str,
+        url: str,
+        deadline: float | None = None,
+    ) -> GeneratedText:
+        del deadline
         self.calls.append((task, element_description, url))
         return GeneratedText(text=self.text, via=self.provider)
 

@@ -54,7 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="an additional allowed origin, e.g. https://example.com (repeatable)",
     )
     parser.add_argument("--allow-private", action="store_true", help="allow private IP targets")
-    parser.add_argument("--allow-external-write", action="store_true", help="approve submit-like actions")
+    parser.add_argument(
+        "--allow-external-write",
+        action="store_true",
+        help="approve external-write actions and unsafe HTTP methods during their Page action",
+    )
     parser.add_argument("--allow-ambiguous", action="store_true", help="approve ambiguous actions")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--headed", dest="headless", action="store_false")
@@ -69,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI-compatible endpoint used to generate field text",
     )
     parser.add_argument("--typing-model", default=os.environ.get("JEV_TYPING_MODEL") or None)
+    parser.add_argument(
+        "--typing-max-cost-per-call",
+        type=float,
+        default=None,
+        help="required upper-bound USD estimate per OpenAI-compatible typing call",
+    )
     parser.add_argument(
         "--extract",
         action="append",
@@ -93,9 +103,13 @@ async def run_cli(args: argparse.Namespace) -> int:
     if not api_key:
         print("TYPESAFE_API_KEY is not set; the judgment transport cannot be built", file=sys.stderr)
         return 2
+    if args.typing_base_url and args.typing_model and args.typing_max_cost_per_call is None:
+        print("refusing to use the typing provider without --typing-max-cost-per-call", file=sys.stderr)
+        return 2
     network = NetworkPolicy(
         allowed_origins=tuple(args.allow_origin),
         allow_private=bool(args.allow_private),
+        allow_unsafe_methods=bool(args.allow_external_write),
     )
     policy: ActionPolicy = default_policy(
         allow_ambiguous=bool(args.allow_ambiguous),
@@ -107,6 +121,7 @@ async def run_cli(args: argparse.Namespace) -> int:
             base_url=args.typing_base_url,
             model=args.typing_model,
             api_key=os.environ.get("JEV_TYPING_API_KEY") or "",
+            max_cost_per_call_usd=args.typing_max_cost_per_call,
         )
     else:
         generator = RuleBasedTextGenerator()

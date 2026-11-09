@@ -89,10 +89,18 @@ def test_network_policy_denies_unlisted_public_hosts(monkeypatch: pytest.MonkeyP
     assert caught.value.code is ErrorCode.NETWORK_BLOCKED
 
 
-def test_network_policy_allows_loopback_by_default() -> None:
-    policy = NetworkPolicy()
-    policy.check("http://127.0.0.1:8000/")
-    policy.check("http://localhost:8000/")
+def test_network_policy_requires_explicit_loopback_permission() -> None:
+    policy = NetworkPolicy(allowed_origins=("https://example.com",))
+    assert policy.origin_allowed("https://example.com/") is True
+    assert policy.origin_allowed("http://127.0.0.1:3000/") is False
+    assert policy.origin_allowed("http://localhost:8000/") is False
+
+    explicit = NetworkPolicy(
+        allowed_origins=("http://127.0.0.1:8000", "http://localhost:8000"),
+        allow_loopback=False,
+    )
+    explicit.check("http://127.0.0.1:8000/")
+    explicit.check("http://localhost:8000/")
 
 
 def test_network_policy_allows_only_explicit_public_origins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,8 +171,9 @@ async def test_context_guard_blocks_unlisted_subresources_and_websockets(
             self.websocket_handler = handler
 
     class FakeRoute:
-        def __init__(self, url: str, resource_type: str) -> None:
-            self.request = SimpleNamespace(url=url, resource_type=resource_type)
+        def __init__(self, url: str, resource_type: str, method: str = "GET", page: object | None = None) -> None:
+            frame = SimpleNamespace(page=page) if page is not None else None
+            self.request = SimpleNamespace(url=url, resource_type=resource_type, method=method, frame=frame)
             self.result = ""
 
         async def abort(self) -> None:
@@ -174,7 +183,8 @@ async def test_context_guard_blocks_unlisted_subresources_and_websockets(
             self.result = "continue"
 
         async def fetch(self, *, max_redirects: int = 0) -> object:
-            return SimpleNamespace(status=200, headers={"content-disposition": "attachment"})
+            headers = {"content-disposition": "attachment"} if self.request.url.endswith("/report") else {}
+            return SimpleNamespace(status=200, headers=headers)
 
         async def fulfill(self, *, response: object) -> None:
             self.result = "fulfill"
@@ -203,7 +213,7 @@ async def test_context_guard_blocks_unlisted_subresources_and_websockets(
     session = BrowserSession(
         page=page,
         owner=owner,
-        network=NetworkPolicy(allowed_origins=("https://allowed.example",)),
+        network=NetworkPolicy(allowed_origins=("https://allowed.example",), allow_unsafe_methods=True),
     )
     await session.install_guard()
 
@@ -221,6 +231,14 @@ async def test_context_guard_blocks_unlisted_subresources_and_websockets(
     download = FakeRoute("https://allowed.example/report", "document")
     await context.http_handler(download)
     assert download.result == "abort"
+
+    unsafe_request = FakeRoute("https://allowed.example/api", "fetch", method="POST", page=page)
+    await context.http_handler(unsafe_request)
+    assert unsafe_request.result == "abort"
+    with session.network.authorize_unsafe_requests(page):
+        approved_request = FakeRoute("https://allowed.example/api", "fetch", method="POST", page=page)
+        await context.http_handler(approved_request)
+    assert approved_request.result == "fulfill"
 
 
 def test_network_policy_rejects_private_ip_by_default() -> None:
@@ -281,6 +299,10 @@ async def test_a_deadline_failure_mid_run_is_terminal_not_a_retry_loop() -> None
         name = "slow"
         calls = 0
 
+        def estimate_max_cost_usd(self, request: dict[str, object]) -> float:
+            del request
+            return 0.0
+
         async def judge(self, *, state: object, questions: object, deadline: float) -> object:
             del state, questions, deadline
             SlowTransport.calls += 1
@@ -307,6 +329,10 @@ async def test_cancel_during_judgment_stops_before_acting() -> None:
     class CancellingTransport:
         name = "cancelling"
         calls = 0
+
+        def estimate_max_cost_usd(self, request: dict[str, object]) -> float:
+            del request
+            return 0.0
 
         async def judge(self, *, state: object, questions: object, deadline: float) -> object:
             del state, questions, deadline
@@ -383,13 +409,17 @@ async def test_owned_session_installs_network_guard_before_initial_navigation(mo
             return FakePlaywright()
 
     monkeypatch.setattr(playwright.async_api, "async_playwright", lambda: FakePlaywrightManager())
-    session = await open_session(start_url="http://127.0.0.1:8000/", network=NetworkPolicy())
+    session = await open_session(
+        start_url="http://127.0.0.1:8000/",
+        network=NetworkPolicy(allowed_origins=("http://127.0.0.1:8000",)),
+    )
     assert events.index("http-route") < events.index("goto")
     assert events.index("websocket-route") < events.index("goto")
     await session.close()
     with pytest.raises(NetworkGuardError, match="service_workers"):
         await open_session(
             start_url="http://127.0.0.1:8000/",
+            network=NetworkPolicy(allowed_origins=("http://127.0.0.1:8000",)),
             context_options={"service_workers": "allow"},
         )
 

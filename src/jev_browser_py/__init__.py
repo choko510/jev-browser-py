@@ -78,6 +78,7 @@ from .redaction import (
     build_redactor as build_redactor,
 )
 from .transport import (
+    CostEstimator,
     JevTransport,
     MockTransport,
     ScriptedTransport,
@@ -99,6 +100,7 @@ _PUBLIC = [
     "CancelToken",
     "CancelledError",
     "ChallengeError",
+    "CostEstimator",
     "ErrorCode",
     "Evidence",
     "EvidenceRef",

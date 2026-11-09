@@ -18,6 +18,7 @@ from typing import Any
 from typesafe_sdk import Choice, Noul
 
 from .contracts import ActionSpace, PageSnapshot
+from .redaction import redact_url_for_model, redact_urls_in_text
 
 __all__ = [
     "CONTROL_ACTIONS",
@@ -57,7 +58,8 @@ def build_criteria(action_space: ActionSpace) -> dict[str, str]:
     proposal can be validated against them without a second mapping.
     """
     criteria: dict[str, str] = {
-        candidate.action_key: _clip(candidate.description) for candidate in action_space.candidates[:MAX_ELEMENTS]
+        candidate.action_key: _clip(redact_urls_in_text(candidate.description))
+        for candidate in action_space.candidates[:MAX_ELEMENTS]
     }
     criteria.update(CONTROL_ACTIONS)
     return criteria
@@ -102,10 +104,13 @@ def select_option_question(element_description: str, options: Sequence[str]) -> 
         raise ValueError("a select question needs at least one option")
     if len(options) > SELECT_OPTION_MAX:
         raise ValueError("too many options for one select question")
-    criteria = {f"o{index}": _clip(label, 80) or "(empty)" for index, label in enumerate(options)}
+    criteria = {
+        f"o{index}": _clip(redact_urls_in_text(label), 80) or "(empty)" for index, label in enumerate(options)
+    }
+    safe_description = redact_urls_in_text(element_description)
     return Choice(
         instructions=(
-            f'Which option should be selected in the dropdown "{_clip(element_description, 80)}", '
+            f'Which option should be selected in the dropdown "{_clip(safe_description, 80)}", '
             "given the task and the page?"
         ),
         criteria=criteria,
@@ -124,14 +129,25 @@ def judgment_state(
     already capped, and the history slice keeps the prompt from growing with
     the run length.
     """
+    safe_history = [
+        {
+            key: redact_urls_in_text(value) if isinstance(value, str) else value
+            for key, value in entry.items()
+        }
+        for entry in history[-8:]
+    ]
     return {
-        "task": task,
-        "current_page": {"url": snapshot.url, "title": snapshot.title},
-        "page_text_excerpt": snapshot.excerpt,
+        "task": redact_urls_in_text(task),
+        "current_page": {
+            "url": redact_url_for_model(snapshot.url),
+            "title": redact_urls_in_text(snapshot.title),
+        },
+        "page_text_excerpt": redact_urls_in_text(snapshot.excerpt),
         "interactive_elements": [
-            {"id": candidate.id, "description": candidate.description} for candidate in snapshot.action_space.candidates
+            {"id": candidate.id, "description": redact_urls_in_text(candidate.description)}
+            for candidate in snapshot.action_space.candidates
         ],
         "element_list_truncated": snapshot.action_space.truncated,
         "no_interactive_elements": len(snapshot.action_space) == 0,
-        "history": list(history[-8:]),
+        "history": safe_history,
     }

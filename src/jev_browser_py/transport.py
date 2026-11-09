@@ -13,14 +13,16 @@ adapter can never sneak an unvalidated value into an executable proposal.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .contracts import ErrorCode, TransportError
+from .contracts import TYPE_SAFE_INPUT_USD_PER_MTOK, ErrorCode, TransportError
 
 __all__ = [
+    "CostEstimator",
     "JevTransport",
     "MockTransport",
     "ScriptedTransport",
@@ -63,7 +65,14 @@ class TransportReply:
 
 
 @runtime_checkable
-class JevTransport(Protocol):
+class CostEstimator(Protocol):
+    """A declared upper-bound estimate for one provider call, in USD."""
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float | None: ...
+
+
+@runtime_checkable
+class JevTransport(CostEstimator, Protocol):
     """Provider-independent judgment call.
 
     Implementations must never touch the page. `deadline` is an absolute
@@ -131,6 +140,13 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _cost_json_default(value: object) -> object:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    return repr(value)
+
+
 @dataclass
 class TypeSafeTransport:
     """Adapter over the official TypeSafe Python SDK.
@@ -146,7 +162,24 @@ class TypeSafeTransport:
     base_url: str | None = None
     timeout: float | None = 30.0
     name: str = "typesafe"
+    prompt_overhead_bytes: int = 65_536
     _client: Any = field(default=None, init=False, repr=False)
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float | None:
+        """Reserve a byte-bounded upper estimate using TypeSafe input pricing.
+
+        UTF-8 bytes are a conservative token upper bound for serialized inputs;
+        fixed SDK/schema overhead is reserved separately. This estimate is not
+        a provider-side billing cap.
+        """
+        if self.prompt_overhead_bytes < 0:
+            return None
+        try:
+            serialized = json.dumps(request, ensure_ascii=False, default=_cost_json_default)
+        except (TypeError, ValueError):
+            return None
+        input_bytes = len(serialized.encode("utf-8")) + self.prompt_overhead_bytes
+        return input_bytes * TYPE_SAFE_INPUT_USD_PER_MTOK / 1_000_000.0
 
     def _build_client(self) -> Any:
         try:
@@ -279,6 +312,10 @@ class MockTransport:
     delay_seconds: float = 0.0
     calls: list[tuple[object, Mapping[str, object]]] = field(default_factory=list)
 
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return self.input_tokens * TYPE_SAFE_INPUT_USD_PER_MTOK / 1_000_000.0
+
     async def judge(
         self,
         *,
@@ -318,7 +355,12 @@ class ScriptedTransport:
     handler: Any
     name: str = "scripted"
     model: str = "jev-scripted-1"
+    max_cost_per_call_usd: float = 0.0
     calls: list[tuple[object, Mapping[str, object]]] = field(default_factory=list)
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return self.max_cost_per_call_usd
 
     async def judge(
         self,

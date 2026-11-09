@@ -10,11 +10,9 @@ Skipped automatically when no Chromium build is installed.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 
-import pytest
-
+from conftest import browser_test_marks
 from fixture_server import RESULT_BODY, RESULT_TITLE, fixture_server
 from jev_browser_py.contracts import RunLimits, RunStatus
 from jev_browser_py.executor import ExecutorOptions, SingleActionExecutor
@@ -25,31 +23,7 @@ from jev_browser_py.snapshot import Snapshotter
 from jev_browser_py.transport import TransportReply
 from jev_browser_py.verifier import RuleBasedVerifier
 
-pytestmark = pytest.mark.browser
-
-
-def _playwright_available() -> bool:
-    try:
-        from playwright.async_api import async_playwright  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _chromium_installed() -> bool:
-    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.join(
-        os.environ.get("LOCALAPPDATA", ""), "ms-playwright"
-    )
-    if not base or not os.path.isdir(base):
-        return False
-    return any(name.startswith("chromium") for name in os.listdir(base))
-
-
-pytestmark = [
-    pytest.mark.browser,
-    pytest.mark.skipif(not _playwright_available(), reason="playwright is not installed"),
-    pytest.mark.skipif(not _chromium_installed(), reason="no local Chromium build for Playwright"),
-]
+pytestmark = browser_test_marks()
 
 
 class CriteriaTransport:
@@ -61,6 +35,10 @@ class CriteriaTransport:
         self._picker = picker
         self.calls = 0
         self.criteria_seen: list[dict[str, str]] = []
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return 0.0
 
     async def judge(self, *, state: object, questions: object, deadline: float) -> TransportReply:
         del deadline
@@ -198,6 +176,85 @@ async def test_full_local_task_reaches_a_verified_result() -> None:
                 assert len(extracted.source_sha256) == 64
             finally:
                 await session.close()
+                await browser.close()
+
+
+async def test_read_link_javascript_post_is_blocked_by_action_side_effect() -> None:
+    from playwright.async_api import async_playwright
+
+    from jev_browser_py.policy import default_policy
+
+    with fixture_server() as base:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            session = await open_session(
+                page=page,
+                network=NetworkPolicy(
+                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
+                ),
+            )
+            try:
+                await session.navigate(f"{base}/js-post")
+                transport = CriteriaTransport(
+                    lambda _call, criteria: _find(criteria, "click_", containing="Open preferences")
+                )
+                result = await run(
+                    "go to account preferences",
+                    transport=transport,
+                    snapshotter=Snapshotter(page),
+                    executor=SingleActionExecutor(page),
+                    policy=default_policy(),
+                    verifier=RuleBasedVerifier(),
+                    limits=RunLimits(max_steps=1, max_seconds=10, max_jev_calls=1),
+                )
+                assert result.verified is False
+                assert await page.locator("#status").text_content() == "blocked"
+            finally:
+                await session.close()
+                await context.close()
+                await browser.close()
+
+
+async def test_explicit_write_authorization_allows_post_form() -> None:
+    from playwright.async_api import async_playwright
+
+    from jev_browser_py.policy import default_policy
+
+    with fixture_server() as base:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            session = await open_session(
+                page=page,
+                network=NetworkPolicy(
+                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
+                ),
+            )
+            try:
+                await session.navigate(f"{base}/post-form")
+                transport = CriteriaTransport(
+                    lambda _call, criteria: next(
+                        key for key, description in criteria.items()
+                        if key.startswith("submit_") and "submit the form now" in description
+                    )
+                )
+                result = await run(
+                    'submit the form and find the phrase "stored"',
+                    transport=transport,
+                    snapshotter=Snapshotter(page),
+                    executor=SingleActionExecutor(page),
+                    policy=default_policy(allow_external_write=True),
+                    verifier=RuleBasedVerifier(),
+                    limits=RunLimits(max_steps=1, max_seconds=10, max_jev_calls=1),
+                )
+                assert result.status is RunStatus.SUCCESS, result.reason
+                assert await page.locator("body").inner_text() == "stored"
+            finally:
+                await session.close()
+                await context.close()
                 await browser.close()
 
 

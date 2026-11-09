@@ -13,12 +13,15 @@ concern with its own validation:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .contracts import ErrorCode, JevBrowserError
+from .transport import CostEstimator
 
 __all__ = [
     "TYPING_WARNING_MESSAGE_MAX",
@@ -88,16 +91,18 @@ class GeneratedText:
 
 
 @runtime_checkable
-class TextGenerator(Protocol):
+class TextGenerator(CostEstimator, Protocol):
     """Produces the text for one field, given the task and the field."""
 
     provider: str
 
-    async def generate(self, *, task: str, element_description: str, url: str) -> GeneratedText: ...
+    async def generate(
+        self, *, task: str, element_description: str, url: str, deadline: float | None = None
+    ) -> GeneratedText: ...
 
 
 @dataclass
-class RuleBasedTextGenerator:
+class RuleBasedTextGenerator(CostEstimator):
     """Deterministic, offline generator used by tests and as a safe default.
 
     It never invents personal data: it derives a short query from the task
@@ -108,7 +113,14 @@ class RuleBasedTextGenerator:
     provider: str = "rule-based"
     redactor_patterns: tuple[str, ...] = field(default_factory=tuple)
 
-    async def generate(self, *, task: str, element_description: str, url: str) -> GeneratedText:
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return 0.0
+
+    async def generate(
+        self, *, task: str, element_description: str, url: str, deadline: float | None = None
+    ) -> GeneratedText:
+        del deadline
         lowered = element_description.lower()
         if any(word in lowered for word in ("password", "email", "e-mail", "username", "login", "phone")):
             raise TextGenerationError("this field needs a user-supplied value; the generator will not invent one")
@@ -125,8 +137,22 @@ class CallableTextGenerator:
     func: Callable[[str, str, str], Awaitable[str]]
     provider: str = "callable"
     max_length: int = GENERATOR_TEXT_MAX
+    max_cost_per_call_usd: float | None = None
 
-    async def generate(self, *, task: str, element_description: str, url: str) -> GeneratedText:
+    def __post_init__(self) -> None:
+        if self.max_cost_per_call_usd is not None and (
+            not math.isfinite(self.max_cost_per_call_usd) or self.max_cost_per_call_usd < 0
+        ):
+            raise ValueError("max_cost_per_call_usd must be finite and non-negative")
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float | None:
+        del request
+        return self.max_cost_per_call_usd
+
+    async def generate(
+        self, *, task: str, element_description: str, url: str, deadline: float | None = None
+    ) -> GeneratedText:
+        del deadline
         raw = await self.func(task, element_description, url)
         return validate_generated_text(raw, via=self.provider, max_length=self.max_length)
 
@@ -146,6 +172,7 @@ class OpenAICompatibleTextGenerator:
     timeout: float = 20.0
     provider: str = "openai-compatible"
     max_length: int = GENERATOR_TEXT_MAX
+    max_cost_per_call_usd: float | None = None
 
     def __post_init__(self) -> None:
         from urllib.parse import urlsplit
@@ -155,8 +182,24 @@ class OpenAICompatibleTextGenerator:
             raise ValueError("base_url must be an absolute http(s) URL")
         if not self.model.strip():
             raise ValueError("model must not be empty")
+        if self.max_cost_per_call_usd is not None and (
+            not math.isfinite(self.max_cost_per_call_usd) or self.max_cost_per_call_usd < 0
+        ):
+            raise ValueError("max_cost_per_call_usd must be finite and non-negative")
 
-    async def generate(self, *, task: str, element_description: str, url: str) -> GeneratedText:
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float | None:
+        del request
+        return self.max_cost_per_call_usd
+
+    async def generate(
+        self, *, task: str, element_description: str, url: str, deadline: float | None = None
+    ) -> GeneratedText:
+        timeout = self.timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TextGenerationError("the run deadline expired before the typing request")
+            timeout = min(timeout, remaining)
         prompt = (
             f'A browser agent is performing this task: "{task}". '
             f"It must type into the {element_description} on {url}. "
@@ -177,7 +220,7 @@ class OpenAICompatibleTextGenerator:
                 f"{self.base_url.rstrip('/')}/chat/completions",
                 payload,
                 headers,
-                self.timeout,
+                timeout,
             )
         except Exception as error:
             raise TextGenerationError(f"typing provider {self.provider}: request failed") from error

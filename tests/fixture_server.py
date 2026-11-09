@@ -54,6 +54,31 @@ _DETAIL = """<!doctype html>
 </body></html>
 """
 
+_JS_POST = """<!doctype html>
+<html><body>
+  <a id="write" href="/noop">Open preferences</a>
+  <p id="status"></p>
+  <script>
+    document.querySelector("#write").addEventListener("click", (event) => {
+      event.preventDefault();
+      fetch("/mutate", {method: "POST", body: "x"})
+        .then((response) => {
+          document.querySelector("#status").textContent = response.ok ? "stored" : "failed";
+        })
+        .catch(() => {
+          document.querySelector("#status").textContent = "blocked";
+        });
+    });
+  </script>
+</body></html>
+"""
+
+_POST_FORM = """<!doctype html>
+<html><body>
+  <form action="/mutate" method="post"><button type="submit">Submit record</button></form>
+</body></html>
+"""
+
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "jev-fixture/1.0"
@@ -97,10 +122,26 @@ class _Handler(BaseHTTPRequestHandler):
         if parts.path == "/other":
             self._send(200, _DETAIL.format(title="Quarterly summary", body="Quarterly figures."))
             return
+        if parts.path == "/js-post":
+            self._send(200, _JS_POST)
+            return
+        if parts.path == "/post-form":
+            self._send(200, _POST_FORM)
+            return
         if parts.path == "/download":
             self._send(200, "<html><body><p>download</p></body></html>")
             return
         self._send(404, "<html><body><p>Page not found</p></body></html>")
+
+    def do_POST(self) -> None:
+        parts = urlsplit(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        if parts.path == "/mutate":
+            self._send(200, "<html><body><p>stored</p></body></html>")
+            return
+        self._send(404, "<html><body>not found</body></html>")
 
     def _send(self, status: int, body: str) -> None:
         encoded = body.encode("utf-8")

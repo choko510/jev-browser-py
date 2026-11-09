@@ -24,23 +24,28 @@ Environment: Windows 11, Python 3.14.3, Playwright 1.64.1 (bundled Chromium),
 Scrapling 0.5.1, TypeSafe SDK 0.7.5.
 
 ```
-python -m pytest -q                          -> 231 passed
-python -m pytest -q -m "not browser"         -> 219 passed, 12 deselected
-python -m pytest -q -m browser               -> 12 passed
-python -m ruff check .                       -> All checks passed
-python -m ruff format --check .              -> 37 files already formatted
-python -m mypy src/jev_browser_py            -> Success: no issues found (17 files)
-python -m build                              -> sdist + wheel built after remediation
-GitHub CI py3.12/3.13 quality, browser, package -> all jobs passed on head f023b1e
-wheel install/import smoke                     -> passed in the CI package job
-python examples/local_task.py                -> status success, verified True (3 actions)
-python scripts/benchmark.py --iterations 5   -> updated .artifacts/benchmark.json (3 actions)
+python -m pytest -q                                      -> 253 passed
+python -m pytest -q -m "not browser"                     -> 238 passed, 15 deselected
+JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 15 passed, 238 deselected; no skips
+python -m ruff check --no-cache .                       -> All checks passed
+python -m ruff format --check .                          -> 37 files already formatted
+python -m mypy src/jev_browser_py                       -> Success: no issues found (17 files)
+python -m build                                          -> sdist + wheel built from this worktree
+python examples/local_task.py                           -> status success, verified True (3 actions)
 ```
 
-Browser tests (real Chromium, loopback fixtures, scripted judgment): the E2E
-search now fills, explicitly submits a GET form, opens the result, and verifies
-the detail phrase. Scope tests include real redirected navigation and subresource
-requests where unlisted hosts are mapped back to loopback; no public site is used.
+**Historical CI correction:** GitHub Actions run `42648478807` reported green on
+prior HEAD `04939bc`, but its browser job logged 12 skipped and 219 deselected.
+That run is not evidence that browser tests executed. The workflow now uses the
+same absolute browser path for installation and testing, disables skip marks in
+required mode, and fails if no browser test passes. A fresh CI run for this
+worktree is pending push.
+
+Browser tests (real Chromium, loopback fixtures, scripted judgment): 15 passed
+locally with required mode enabled. They include the verified search path, a
+same-origin JavaScript POST blocked for a read link, an explicitly authorized
+POST form, redirects/subresources, and local page-scope behavior; no public site
+is used.
 
 ## Not executed here
 
@@ -64,15 +69,15 @@ requests where unlisted hosts are mapped back to loopback; no public site is use
 | PYJEV-T05 | `test_runtime.py` (double match, stale fingerprint, stale snapshot) |
 | PYJEV-T06 | `test_runtime.py`, `test_verifier.py` (done alone never succeeds) |
 | PYJEV-T07 | `test_runtime.py` (full-confidence submit denied, zero actions) |
-| PYJEV-T08 | `test_runtime.py` (deadline, cancel, stuck) |
+| PYJEV-T08 | `test_runtime.py` (global awaited-stage deadlines, cancel, stuck) |
 | PYJEV-T09 | `test_runtime.py`, `test_security.py` (terminal error, no retry) |
-| PYJEV-T10 | `test_redaction.py`, `test_redaction_wiring.py`, `test_security.py` |
+| PYJEV-T10 | `test_redaction.py`, `test_redaction_wiring.py`, `test_security.py` (unknown URL tokens at model boundaries) |
 | PYJEV-T11 | `test_extraction.py` (socket-failing extraction, provenance) |
-| PYJEV-T12 | `test_security.py`, `test_scope.py` (private IP, scheme, cross-origin) |
+| PYJEV-T12 | `test_security.py`, `test_scope.py` (private IP, loopback, scheme, cross-origin, unsafe methods) |
 | PYJEV-T13 | `test_runtime.py` (`UNKNOWN_EFFECT`, no automatic resend) |
 | PYJEV-T14 | `test_security.py` (separate sessions, locks, pages) |
 | PYJEV-T15 | `test_scope.py` (SPA, iframe, canvas, popup) |
-| PYJEV-T16 | `test_e2e_local.py` (search → list → detail → verified) |
+| PYJEV-T16 | `test_e2e_local.py` (search → detail, read-link POST blocked, explicitly authorized submit verified) |
 | PYJEV-T17 | `scripts/benchmark.py` (p50/p95, tokens, elapsed, RSS) |
 
 ## Release-gate assessment
@@ -82,17 +87,20 @@ requests where unlisted hosts are mapped back to loopback; no public site is use
 | Library API and CLI start real browser tasks | `examples/`, `cli.py`, E2E tests |
 | Offline CI fixture covers navigate → interact → extract | E2E + extraction tests |
 | Choice/Noul anomalies fail closed | `test_judgment.py` (28 cases) |
-| Unknown buttons and POST/unknown submits fail closed | `judgment.py`, `policy.py`, `test_policy_and_typing.py` |
+| Unknown buttons and unapproved HTTP writes fail closed | `judgment.py`, `policy.py`, `session.py`, `test_policy_and_typing.py`, `test_e2e_local.py` |
 | Independent verifier prevents false success | `test_verifier.py` + E2E |
-| No critical secret leak path found | redaction suite + wiring regression test |
-| Cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_security.py` |
-| HTTP allow-list, redirect, and subresource policy | `test_security.py`, `test_scope.py` (application guard only; not an egress firewall) |
+| Unknown URL query/fragment/userinfo and opaque tokens are masked before provider inputs | `test_redaction.py`, `test_redaction_wiring.py` (URL heuristic is not a complete PII detector) |
+| Global deadlines, estimator fail-closed, cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_security.py` |
+| Loopback default-deny, action-scoped unsafe methods, redirect and subresource policy | `test_security.py`, `test_scope.py` (application guard only; not an egress firewall) |
 | Single-fetch Scrapling extraction with evidence | `test_extraction.py` |
-| Scope limits documented | `docs/limits.md` |
+| Scope limits and cost-estimator billing caveat documented | `docs/limits.md` |
 | Reproducible benchmark recorded | `.artifacts/benchmark.json` (scripted local fixture only) |
 | No unmeasured performance claim | README + benchmark `not measured` field |
 
 **Remaining release gaps:** the upstream TypeScript comparison and paid live
-smoke are unmeasured here. The Python network guard remains best-effort and is
-not an egress firewall; use verified external isolation before untrusted public
-access. These are explicit gaps, not a v1.0 completion claim.
+smoke are unmeasured here; a fresh GitHub Actions run for this remediation is
+pending push. Cost control fails closed on unknown estimates but is not a
+provider-enforced invoice cap. The Python network guard remains best-effort and
+is not an egress firewall; use verified external isolation before untrusted
+public access. PR #1 remains Draft; these are explicit gaps, not a v1.0
+completion claim.

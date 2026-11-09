@@ -7,39 +7,14 @@ each boundary.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
+from conftest import browser_test_marks
 from fixture_server import fixture_server
 from jev_browser_py.session import NetworkPolicy, open_session
 from jev_browser_py.snapshot import Snapshotter
 
-pytestmark = pytest.mark.browser
-
-
-def _playwright_available() -> bool:
-    try:
-        from playwright.async_api import async_playwright  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _chromium_installed() -> bool:
-    base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.join(
-        os.environ.get("LOCALAPPDATA", ""), "ms-playwright"
-    )
-    if not base or not os.path.isdir(base):
-        return False
-    return any(name.startswith("chromium") for name in os.listdir(base))
-
-
-pytestmark = [
-    pytest.mark.browser,
-    pytest.mark.skipif(not _playwright_available(), reason="playwright is not installed"),
-    pytest.mark.skipif(not _chromium_installed(), reason="no local Chromium build"),
-]
+pytestmark = browser_test_marks()
 
 SPA_HTML = """<!doctype html>
 <html><head><title>SPA fixture</title></head>
@@ -240,6 +215,33 @@ async def test_context_guard_blocks_unlisted_subresource(
                 await page.wait_for_function("() => document.querySelector('img')?.complete")
                 width = await page.locator("img").evaluate("img => img.naturalWidth")
                 assert width == 0
+            finally:
+                await session.close()
+                await context.close()
+                await browser.close()
+
+
+async def test_read_link_javascript_post_requires_action_scoped_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from playwright.async_api import async_playwright
+
+    with fixture_server() as base:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            session = await open_session(
+                page=page,
+                network=NetworkPolicy(
+                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
+                ),
+            )
+            try:
+                await session.navigate(f"{base}/js-post")
+                await page.locator("#write").click()
+                await page.wait_for_function("document.querySelector('#status')?.textContent")
+                assert await page.locator("#status").text_content() == "blocked"
             finally:
                 await session.close()
                 await context.close()

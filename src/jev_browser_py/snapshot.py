@@ -23,12 +23,12 @@ import hashlib
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .action_space import MAX_RAW_ELEMENTS, RawElement, build_action_space, raw_from_mapping
 from .contracts import PageSnapshot, RedactionStatus, SnapshotTooLargeError
-from .redaction import RedactionFailure, Redactor, build_redactor
+from .redaction import RedactionFailure, Redactor, build_redactor, redact_url_for_model, redact_urls_in_text
 
 __all__ = [
     "EXCERPT_CHARS",
@@ -342,13 +342,17 @@ class Snapshotter:
 
     def _redact_element(self, element: RawElement) -> RawElement:
         if not self._redactor.has_secrets():
-            return element
+            return replace(
+                element,
+                text=redact_urls_in_text(element.text)[: self._options.label_cap],
+                href=redact_url_for_model(element.href),
+            )
         return RawElement(
             attr=element.attr,
             tag=element.tag,
             role=element.role,
             text=self._redact(element.text)[: self._options.label_cap],
-            href=self._redact(element.href),
+            href=redact_url_for_model(self._redact(element.href)),
             type_attr=element.type_attr,
             form_method=element.form_method,
             clickable=element.clickable,
@@ -365,7 +369,7 @@ class Snapshotter:
 
     def _redact(self, text: str) -> str:
         try:
-            return self._redactor.redact(text)
+            return redact_urls_in_text(self._redactor.redact(text))
         except RedactionFailure as error:
             raise SnapshotTooLargeError("redaction failed; refusing to expose page text to the model") from error
 

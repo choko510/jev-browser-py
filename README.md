@@ -105,7 +105,9 @@ jev-browser 'find the phrase "pricing section"' https://example.com/ \
 ```
 
 The CLI refuses to run without `--allow-origin` (or `--allow-private`). That refusal is
-deliberate: the Python-side network guard is not an egress firewall.
+deliberate: the Python-side network guard is not an egress firewall. Loopback is
+not implicit: local targets require an exact `--allow-origin`; `--allow-private`
+does not enable localhost.
 
 ## Observable surface
 
@@ -139,17 +141,28 @@ deliberate: the Python-side network guard is not an egress firewall.
   also offered as `submit_eN`, never as a click.
 - `external_write` and `ambiguous` side-effect classes require an explicit opt-in
   (`default_policy(allow_external_write=True)`). A confidence of 1.0 does not bypass this.
-- `run()` serializes a Page through a shared per-Page lock. Freshness is checked against
-  the exact proposal snapshot and a fresh live fingerprint immediately before dispatch.
-  Direct `SingleActionExecutor.execute_one()` callers must supply `current_snapshot` and
-  coordinate that same Page lock themselves.
+- Loopback is denied by default; an exact local origin must be allow-listed. Unsafe HTTP
+  methods (including POST/PUT/PATCH/DELETE) are blocked unless the network policy enables
+  them and an approved write/ambiguous action is currently executing. The CLI's
+  `--allow-external-write` enables both policy gates; API callers must configure both.
+- `run()` serializes a Page through a shared per-Page lock and refuses a real Playwright
+  Page without a registered `open_session` network guard. Freshness is checked against the
+  exact proposal snapshot and a fresh live fingerprint immediately before dispatch. Direct
+  `SingleActionExecutor.execute_one()` callers must install/use a guarded session, supply
+  `current_snapshot`, coordinate that same Page lock, and explicitly scope any unsafe
+  requests themselves.
 - A click or submit that fails *after* it may have reached the server becomes `UNCERTAIN`
   and the run stops without retrying (`RunStatus.UNKNOWN_EFFECT`).
 - Password fields are never offered unless a credential source is active; sensitive field
   names (`password`, `email`, `credit card`, ...) never receive generated text.
 - Configured secrets are redacted in every representation (raw, HTML-escaped, URL-encoded,
-  JSON-escaped) before page text reaches the model or a trace. Redaction failure stops the
-  run.
+  JSON-escaped) before page text reaches the model or a trace. Model-facing URLs also remove
+  userinfo, fragments, all query values (including unknown keys), and long opaque path tokens.
+  Redaction failure stops the run.
+- Every provider must declare a per-call maximum with `CostEstimator.estimate_max_cost_usd`;
+  missing, invalid, or over-budget estimates block the call before dispatch. `RunResult` reports
+  the reserved `estimated_cost_usd`. The OpenAI-compatible typing provider needs an explicit
+  per-call cap (`--typing-max-cost-per-call` on the CLI).
 - An injected page is never closed; only self-created browser/context/page objects are.
 
 **What the code does *not* enforce**
@@ -160,6 +173,11 @@ deliberate: the Python-side network guard is not an egress firewall.
   have service workers; their context-level WebSocket route remains until that Context is
   closed. Use a dedicated Context and real isolation (container, proxy, or host firewall)
   for untrusted goals.
+- The local cost ceiling is only as reliable as each provider's declared upper-bound estimator
+  and reported usage. It is not a provider-enforced financial cap: billing, hidden provider
+  overhead, or already-accepted remote work can differ. Configure provider-side spending limits
+  for a hard invoice cap. `max_seconds` bounds the run's awaited work and passes the remaining
+  deadline to the typing HTTP request, but it cannot recall work already accepted remotely.
 - `RuleBasedVerifier` verifies explicit goal phrases only. Goals without an extractable
   evidence target remain `UNVERIFIED`; use a task-specific `CallableVerifier` for
   destination or state checks.
@@ -174,16 +192,17 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q` (all) | 231 passed |
-| `python -m pytest -q -m "not browser"` (offline) | 219 passed, 12 deselected |
-| `python -m pytest -q -m browser` | 12 passed |
-| `python -m ruff check .` | clean |
-| `python -m ruff format --check .` | clean (37 files) |
-| `python -m mypy src/jev_browser_py` | clean (17 files) |
-| `python -m build` | sdist + wheel built; CI wheel install/import smoke passed on `f023b1e` |
-| GitHub Actions (py3.12/3.13 quality, browser, package) | all jobs passed on `f023b1e` |
+| `python -m pytest -q` (all) | 253 passed |
+| `python -m pytest -q -m "not browser"` (offline) | 238 passed, 15 deselected |
+| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 15 passed, 238 deselected; no browser skips |
+| `python -m ruff check --no-cache .` | all checks passed |
+| `python -m ruff format --check .` | 37 files already formatted |
+| `python -m mypy src/jev_browser_py` | no issues (17 files) |
+| `python -m build` | sdist + wheel built from the remediation worktree |
 | `python examples/local_task.py` | `success`, `verified: True` (3 actions) |
-| `python scripts/benchmark.py --iterations 5` | snapshot p50 ≈ 4.5 ms, full local run ≈ 0.52 s (3 actions) |
+| GitHub Actions run `42648478807` on prior HEAD `04939bc` | jobs reported green, but browser logs showed 12 skipped and 219 deselected; not accepted as browser execution evidence |
+| Current branch GitHub Actions | pending the remediation push; the required-mode browser test step now fails if no browser test passes |
+| `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
 the upstream TypeScript comparison. `scripts/benchmark.py` records
@@ -203,12 +222,14 @@ python -m ruff format --check .
 python -m mypy src/jev_browser_py
 python -m pytest -q -m "not browser"
 python -m playwright install chromium
-python -m pytest -q tests/test_e2e_local.py
+JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser
 ```
 
-CI runs lint, format check, mypy, offline tests on Python 3.12 and 3.13, the local
-Chromium E2E, and a wheel build. The paid smoke is a separate manual workflow so no pull
-request can spend money.
+CI uses the same absolute `PLAYWRIGHT_BROWSERS_PATH` for browser installation and
+execution and sets `JEV_REQUIRE_BROWSER_TESTS=1`; that mode removes browser skip
+markers and fails if no browser test passes. CI runs lint, format check, mypy,
+offline tests on Python 3.12 and 3.13, Chromium E2E, and a wheel build. The paid
+smoke is a separate manual workflow so no pull request can spend money.
 
 ## Packaging
 

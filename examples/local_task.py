@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,10 @@ class DemoTransport:
     """Behaves like a model: searches, then clicks the matching result."""
 
     name = "demo"
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return 0.0
 
     def __init__(self) -> None:
         self.calls = 0

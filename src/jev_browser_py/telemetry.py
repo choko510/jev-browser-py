@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .contracts import RunResult, StepTrace
+from .contracts import TYPE_SAFE_INPUT_USD_PER_MTOK, RunResult, StepTrace
 from .redaction import REDACTED, RedactionFailure, Redactor, build_redactor
 
 __all__ = [
@@ -26,7 +26,7 @@ __all__ = [
     "run_summary",
 ]
 
-PRICE_PER_MTOK_IN = 0.042
+PRICE_PER_MTOK_IN = TYPE_SAFE_INPUT_USD_PER_MTOK
 
 
 @dataclass
@@ -115,7 +115,11 @@ def run_summary(result: RunResult) -> PublicRunReport:
         jev_calls=result.jev_calls,
         input_tokens=result.usage.input_tokens,
         output_tokens=result.usage.output_tokens,
-        estimated_cost_usd=result.usage.estimated_cost_usd(),
+        estimated_cost_usd=(
+            result.estimated_cost_usd
+            if result.estimated_cost_usd is not None
+            else result.usage.estimated_cost_usd()
+        ),
         elapsed_seconds=result.elapsed_seconds,
         final_url=result.final_url,
         trace=result.trace,

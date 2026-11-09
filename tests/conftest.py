@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Mapping
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,6 +15,75 @@ from jev_browser_py.action_space import RawElement, build_action_space
 from jev_browser_py.contracts import ActionSpace, PageSnapshot
 from jev_browser_py.questions import build_criteria
 from jev_browser_py.transport import MockTransport, TransportReply
+
+
+def browser_install_path() -> Path:
+    """Resolve Playwright's browser store exactly as the runtime environment does."""
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if configured:
+        if configured == "0":
+            try:
+                import playwright
+            except ImportError:
+                return Path()
+            return Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+        return Path(os.path.expandvars(os.path.expanduser(configured)))
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return root / "ms-playwright"
+    return Path.home() / ".cache" / "ms-playwright"
+
+
+def playwright_available() -> bool:
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def chromium_installed() -> bool:
+    try:
+        return any(path.name.startswith("chromium") for path in browser_install_path().iterdir())
+    except OSError:
+        return False
+
+
+def browser_test_marks() -> list[Any]:
+    """Skip locally when unavailable, but never skip CI-required browser tests."""
+    marks: list[Any] = [pytest.mark.browser]
+    if os.environ.get("JEV_REQUIRE_BROWSER_TESTS") == "1":
+        return marks
+    if not playwright_available():
+        marks.append(pytest.mark.skipif(True, reason="playwright is not installed"))
+    if not chromium_installed():
+        marks.append(pytest.mark.skipif(True, reason="no local Chromium build for Playwright"))
+    return marks
+
+
+_BROWSER_REQUIRED_PASSES = 0
+
+
+def pytest_runtest_logreport(report: Any) -> None:
+    global _BROWSER_REQUIRED_PASSES
+    if (
+        os.environ.get("JEV_REQUIRE_BROWSER_TESTS") == "1"
+        and report.when == "call"
+        and report.passed
+        and "browser" in report.keywords
+    ):
+        _BROWSER_REQUIRED_PASSES += 1
+
+
+def pytest_sessionfinish(session: Any, exitstatus: pytest.ExitCode) -> None:
+    if (
+        os.environ.get("JEV_REQUIRE_BROWSER_TESTS") == "1"
+        and session.config.getoption("markexpr") == "browser"
+        and exitstatus == pytest.ExitCode.OK
+        and _BROWSER_REQUIRED_PASSES == 0
+    ):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def make_snapshot(

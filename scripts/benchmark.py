@@ -22,6 +22,7 @@ import platform
 import statistics
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ class FixedTransport:
     """One-action-per-step scripted transport for overhead measurement."""
 
     name = "benchmark"
+
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float:
+        del request
+        return 0.0
 
     def __init__(self) -> None:
         self.calls = 0

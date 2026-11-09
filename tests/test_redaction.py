@@ -10,6 +10,8 @@ from jev_browser_py.redaction import (
     Redactor,
     detect_secret_markers,
     redact_query_string,
+    redact_url_for_model,
+    redact_urls_in_text,
     scrub_pii,
 )
 
@@ -85,6 +87,45 @@ def test_query_string_secrets_are_stripped() -> None:
     assert "abc123" not in cleaned
     assert "zzz" not in cleaned
     assert "state=ok" in cleaned
+
+
+def test_model_url_redaction_masks_unknown_credentials_query_fragment_and_opaque_path() -> None:
+    password = "unknown-user-password"
+    path_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-token"
+    query_token = "unlisted-query-token-123"
+    fragment_token = "fragment-secret-456"
+    url = (
+        f"https://user:{password}@example.test/reset/{path_token}"
+        f"?unrecognized={query_token}#auth={fragment_token}"
+    )
+
+    safe = redact_url_for_model(url)
+
+    assert "example.test" in safe
+    for secret in ("user", password, path_token, query_token, fragment_token):
+        assert secret not in safe
+    assert "[REDACTED]" in safe
+
+
+def test_absolute_urls_in_model_text_are_sanitized() -> None:
+    text = "Continue at https://example.test/callback?opaque=unlisted-token."
+
+    safe = redact_urls_in_text(text)
+
+    assert "unlisted-token" not in safe
+    assert safe.endswith(".")
+
+
+def test_relative_urls_in_model_text_hide_unknown_tokens() -> None:
+    path_token = "opaque-relative-path-token-abcdef1234567890"
+    query_token = "unlisted-relative-query-token"
+    fragment_token = "unlisted-relative-fragment-token"
+    text = f"Open /reset/{path_token}?unknown={query_token} or /login#state={fragment_token}"
+
+    safe = redact_urls_in_text(text)
+
+    for secret in (path_token, query_token, fragment_token):
+        assert secret not in safe
 
 
 def test_detect_secret_markers_never_returns_values() -> None:
