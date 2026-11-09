@@ -21,7 +21,7 @@
 
 ### 予定するパッケージ
 
-\`\`\`text
+```text
 src/jev_browser_py/
   contracts.py     # 公開DTO
   transport.py     # Jev推論インターフェイス
@@ -33,7 +33,7 @@ src/jev_browser_py/
   extraction.py    # Scrapling Selector
   verifier.py      # 独立した結果検証
   cli.py           # 後段で追加
-\`\`\`
+```
 
 ※ 上記は将来の想定ファイルであり、現時点で存在することを意味しません。
 
