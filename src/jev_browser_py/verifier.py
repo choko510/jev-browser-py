@@ -198,9 +198,11 @@ class RuleBasedVerifier:
                 evidence=tuple(evidence),
             )
         missing = [phrase for phrase in expectations if phrase.lower() not in haystack]
-        for phrase in expectations:
-            if phrase not in missing:
-                evidence.append(EvidenceRef(kind="phrase", ref=phrase[:120], detail="found on the final page"))
+        evidence.extend(
+            EvidenceRef(kind="phrase", ref=phrase[:120], detail="found on the final page")
+            for phrase in expectations
+            if phrase not in missing
+        )
         if missing:
             return VerificationResult(
                 verified=False,

@@ -95,7 +95,11 @@ def test_search_submit_for_post_form_requires_external_write_permission() -> Non
     )
     submit = next(candidate for candidate in space.candidates if candidate.kind is ActionKind.SUBMIT)
     assert side_effect_of(submit.action_key, submit) is SideEffectClass.EXTERNAL_WRITE
-    assert default_policy().decide(proposal=_proposal(space, submit.action_key), snapshot=make_snapshot(action_space=space)).allowed is False
+    decision = default_policy().decide(
+        proposal=_proposal(space, submit.action_key),
+        snapshot=make_snapshot(action_space=space),
+    )
+    assert decision.allowed is False
 
 
 def test_get_search_submit_remains_a_read_action() -> None:
@@ -116,7 +120,11 @@ def test_get_search_submit_remains_a_read_action() -> None:
     )
     submit = next(candidate for candidate in space.candidates if candidate.kind is ActionKind.SUBMIT)
     assert side_effect_of(submit.action_key, submit) is SideEffectClass.READ
-    assert default_policy().decide(proposal=_proposal(space, submit.action_key), snapshot=make_snapshot(action_space=space)).allowed is True
+    decision = default_policy().decide(
+        proposal=_proposal(space, submit.action_key),
+        snapshot=make_snapshot(action_space=space),
+    )
+    assert decision.allowed is True
 
 
 def test_external_write_can_be_opened_explicitly() -> None:

@@ -173,7 +173,7 @@ async def _judge_select(
     if candidate is None or not candidate.options:
         raise InvalidJudgmentError("select action has no options to choose from")
     question = select_option_question(candidate.description, list(candidate.options))
-    reply = await context.transport.judge(
+    return await context.transport.judge(
         state={
             "task": context.goal,
             "page": {"url": snapshot.url, "title": snapshot.title},
@@ -183,7 +183,6 @@ async def _judge_select(
         questions={"option": question},
         deadline=deadline,
     )
-    return reply
 
 
 async def run(
@@ -318,7 +317,11 @@ async def _run_unlocked(
         if context.cancel_token is not None and context.cancel_token.cancelled:
             return _result(RunStatus.CANCELLED, context.cancel_token.reason, error_code=ErrorCode.CANCELLED)
         if _clock() >= deadline:
-            return _result(RunStatus.TIMEOUT, "the run deadline expired before the next action", error_code=ErrorCode.TIMEOUT)
+            return _result(
+                RunStatus.TIMEOUT,
+                "the run deadline expired before the next action",
+                error_code=ErrorCode.TIMEOUT,
+            )
         return None
 
     step_number = 0
@@ -423,7 +426,9 @@ async def _run_unlocked(
         )
 
         if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
-            trace[-1] = trace[-1].model_copy(update={"outcome": "budget_exceeded", "detail": "model cost limit reached"})
+            trace[-1] = trace[-1].model_copy(
+                update={"outcome": "budget_exceeded", "detail": "model cost limit reached"}
+            )
             return _result(
                 RunStatus.BUDGET_EXCEEDED,
                 f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
@@ -523,7 +528,11 @@ async def _run_unlocked(
                 except TransportError as error:
                     return _result(RunStatus.ERROR, error.message, error_code=ErrorCode.TRANSPORT_FAILED)
                 except TimeoutError:
-                    return _result(RunStatus.TIMEOUT, "the select judgment exceeded the run deadline", error_code=ErrorCode.TIMEOUT)
+                    return _result(
+                        RunStatus.TIMEOUT,
+                        "the select judgment exceeded the run deadline",
+                        error_code=ErrorCode.TIMEOUT,
+                    )
                 except InvalidJudgmentError as error:
                     return _result(
                         RunStatus.INVALID_JUDGMENT,
@@ -531,7 +540,11 @@ async def _run_unlocked(
                         error_code=ErrorCode.INVALID_JUDGMENT,
                     )
                 except CancelledError:
-                    return _result(RunStatus.CANCELLED, "cancelled while choosing a select option", error_code=ErrorCode.CANCELLED)
+                    return _result(
+                        RunStatus.CANCELLED,
+                        "cancelled while choosing a select option",
+                        error_code=ErrorCode.CANCELLED,
+                    )
                 stop_result = _stop_after_wait()
                 if stop_result is not None:
                     return stop_result
@@ -566,7 +579,9 @@ async def _run_unlocked(
             try:
                 live_snapshot = await snapshotter.observe()
             except Exception as error:  # noqa: BLE001 - current target must be observable to act
-                trace[-1] = trace[-1].model_copy(update={"outcome": "stale", "detail": "live target could not be re-observed"})
+                trace[-1] = trace[-1].model_copy(
+                    update={"outcome": "stale", "detail": "live target could not be re-observed"}
+                )
                 return _result(
                     RunStatus.BLOCKED,
                     "the live target could not be re-observed; no action was executed",

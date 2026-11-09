@@ -336,7 +336,11 @@ class SingleActionExecutor:
                 return ActionExecution(acted=False, detail="typing disabled", error="typing disabled")
             text = self._validated_text(typed_text)
             await self._page.fill(selector, text, timeout=timeout)
-            return ActionExecution(acted=True, detail=f"search text prepared (len {len(text)}); not submitted", typed_text=text)
+            return ActionExecution(
+                acted=True,
+                detail=f"search text prepared (len {len(text)}); not submitted",
+                typed_text=text,
+            )
         if candidate.kind is ActionKind.TYPE:
             if not options.allow_typing:
                 return ActionExecution(acted=False, detail="typing disabled", error="typing disabled")

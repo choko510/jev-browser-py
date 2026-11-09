@@ -834,9 +834,9 @@ async def test_select_cancel_after_secondary_judgment_stops_before_acting(space:
     assert executor.action_count == 0
 
 
-async def test_select_deadline_is_not_reset_for_secondary_judgment(space: ActionSpace, monkeypatch: pytest.MonkeyPatch) -> None:
-    from jev_browser_py.contracts import CancelToken
-
+async def test_select_deadline_is_not_reset_for_secondary_judgment(
+    space: ActionSpace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     expired = False
 
     def clock() -> float:
@@ -892,7 +892,9 @@ async def test_select_deadline_is_not_reset_for_secondary_judgment(space: Action
     assert executor.action_count == 0
 
 
-async def test_deadline_after_text_generation_stops_before_acting(space: ActionSpace, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_deadline_after_text_generation_stops_before_acting(
+    space: ActionSpace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from jev_browser_py.typing import GeneratedText
 
     expired = False

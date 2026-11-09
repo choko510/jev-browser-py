@@ -177,15 +177,19 @@ async def test_cross_origin_navigation_is_blocked_by_the_policy() -> None:
                 await browser.close()
 
 
-async def test_context_route_blocks_a_real_redirect_to_an_unlisted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_context_route_blocks_a_real_redirect_to_an_unlisted_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import socket
 
     from playwright.async_api import async_playwright
+
     from jev_browser_py.contracts import NetworkGuardError
 
-    public_dns = lambda *_args, **_kwargs: [
-        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-    ]
+    def public_dns(*_args, **_kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+        ]
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     with fixture_server() as base:
         async with async_playwright() as playwright:
@@ -209,14 +213,17 @@ async def test_context_route_blocks_a_real_redirect_to_an_unlisted_origin(monkey
                 await browser.close()
 
 
-async def test_context_guard_blocks_unlisted_subresource(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_context_guard_blocks_unlisted_subresource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import socket
 
     from playwright.async_api import async_playwright
 
-    public_dns = lambda *_args, **_kwargs: [
-        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-    ]
+    def public_dns(*_args, **_kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+        ]
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     with fixture_server() as base:
         async with async_playwright() as playwright:
@@ -241,15 +248,18 @@ async def test_context_guard_blocks_unlisted_subresource(monkeypatch: pytest.Mon
                 await browser.close()
 
 
-async def test_redirect_to_a_private_host_is_refused_before_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_redirect_to_a_private_host_is_refused_before_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The destination is checked, so a redirect target is judged on its own."""
     import socket
 
     from jev_browser_py.contracts import NetworkGuardError
 
-    public_dns = lambda *_args, **_kwargs: [
-        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
-    ]
+    def public_dns(*_args, **_kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+        ]
     monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy(allowed_origins=("https://public.example",))
     assert policy.origin_allowed("https://public.example/start") is True
