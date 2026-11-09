@@ -122,18 +122,17 @@ async def run_cli(args: argparse.Namespace) -> int:
     try:
         snapshotter = Snapshotter(session.page, redactor=redactor)
         executor = _build_executor(session.page)
-        async with session.action_lock:
-            result = await run(
-                args.goal,
-                transport=transport,
-                snapshotter=snapshotter,
-                executor=executor,
-                policy=policy,
-                verifier=RuleBasedVerifier(),
-                limits=limits,
-                options=RunOptions(),
-                text_generator=generator,
-            )
+        result = await run(
+            args.goal,
+            transport=transport,
+            snapshotter=snapshotter,
+            executor=executor,
+            policy=policy,
+            verifier=RuleBasedVerifier(),
+            limits=limits,
+            options=RunOptions(),
+            text_generator=generator,
+        )
         report = run_summary(result).as_dict()
         if args.extract:
             specs = [_parse_selector_spec(value) for value in args.extract]

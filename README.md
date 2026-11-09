@@ -2,10 +2,10 @@
 
 **Python-native browser agent inspired by [Jev Browser](https://github.com/jkudish/jev-browser), with [Scrapling](https://github.com/D4Vinci/Scrapling) extraction.**
 
-> **Status (2026-11-09):** v1.0 standalone implementation. Python 3.12+, async Playwright,
-> the official TypeSafe Python SDK, and Scrapling are integrated. The library, CLI, tests,
-> CI, and benchmark harness run; see [Verification](#verification) for what was actually
-> executed here and what was not.
+> **Status (2026-11-09):** Draft standalone implementation under review; not release-ready.
+> Python 3.12+, async Playwright, the official TypeSafe Python SDK, and Scrapling are
+> integrated. Safety limits and remaining verification gaps are listed in
+> [docs/status.md](docs/status.md) and [docs/limits.md](docs/limits.md).
 
 ## Purpose
 
@@ -97,7 +97,7 @@ goal. Anything else is a classified non-success.
 
 ```bash
 export TYPESAFE_API_KEY=...
-jev-browser "find the pricing section" https://example.com/ \
+jev-browser 'find the phrase "pricing section"' https://example.com/ \
   --allow-origin https://example.com \
   --max-steps 8 --max-seconds 90 \
   --extract title=title --extract links=a \
@@ -133,12 +133,16 @@ deliberate: the Python-side network guard is not an egress firewall.
 
 - Judgment is a proposal. `parse_proposal` rejects any action not present in the current
   action space; the policy then denies by default.
-- `submit` controls are always offered as `submit_eN`, never as a click, so a form
-  submission appears in the trace as an explicit decision.
+- `search_eN` fills a query without pressing Enter. A separate `submit_eN` is the
+  explicit submit proposal; only a known GET search form is read-only, while POST or
+  unknown submission requires explicit policy permission. Other submit controls are
+  also offered as `submit_eN`, never as a click.
 - `external_write` and `ambiguous` side-effect classes require an explicit opt-in
   (`default_policy(allow_external_write=True)`). A confidence of 1.0 does not bypass this.
-- Freshness is checked twice: the proposal must match the exact `snapshot_id`, and the
-  candidate fingerprint must still match, immediately before dispatch.
+- `run()` serializes a Page through a shared per-Page lock. Freshness is checked against
+  the exact proposal snapshot and a fresh live fingerprint immediately before dispatch.
+  Direct `SingleActionExecutor.execute_one()` callers must supply `current_snapshot` and
+  coordinate that same Page lock themselves.
 - A click or submit that fails *after* it may have reached the server becomes `UNCERTAIN`
   and the run stops without retrying (`RunStatus.UNKNOWN_EFFECT`).
 - Password fields are never offered unless a credential source is active; sensitive field
@@ -150,12 +154,17 @@ deliberate: the Python-side network guard is not an egress firewall.
 
 **What the code does *not* enforce**
 
-- **The Python network guard is best-effort.** Chromium issues requests the Python layer
-  never sees. `NetworkPolicy` prevents accidents and documents intent; it is not an
-  egress firewall. Do not run untrusted goals against the public internet without real
-  isolation (container, proxy, or host firewall).
+- **The Python network guard is best-effort.** Context routing filters observed HTTP and
+  WebSocket traffic and blocks redirects, but browser preconnects or platform-level traffic
+  may bypass it. `NetworkPolicy` is not an egress firewall. Injected contexts may already
+  have service workers; their context-level WebSocket route remains until that Context is
+  closed. Use a dedicated Context and real isolation (container, proxy, or host firewall)
+  for untrusted goals.
+- `RuleBasedVerifier` verifies explicit goal phrases only. Goals without an extractable
+  evidence target remain `UNVERIFIED`; use a task-specific `CallableVerifier` for
+  destination or state checks.
 - CAPTCHA/MFA/login walls are reported as `needs_human`/`blocked`, never bypassed.
-- v1.0 supports same-document actions, native selects, scrolling, and back. SPA route
+- The current draft supports same-document actions, native selects, scrolling, and back. SPA route
   changes that keep the same DOM are handled; iframe, Shadow DOM, and popup targets are
   out of scope and stop safely rather than pretending to succeed.
 
@@ -165,14 +174,15 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q` (all) | 208 passed |
-| `python -m pytest -q -m "not browser"` (offline) | 203 passed, 5 deselected |
+| `python -m pytest -q` (all) | 231 passed |
+| `python -m pytest -q -m "not browser"` (offline) | 219 passed, 12 deselected |
+| `python -m pytest -q -m browser` | 12 passed |
 | `python -m ruff check .` | clean |
-| `python -m ruff format --check .` | clean |
+| `python -m ruff format --check .` | clean (37 files) |
 | `python -m mypy src/jev_browser_py` | clean (17 files) |
-| `python -m build` + clean-venv install | sdist + wheel build, install, and import |
-| `python examples/local_task.py` | `success`, `verified: True` |
-| `python scripts/benchmark.py` | snapshot p50 ≈ 5 ms, full local run ≈ 0.35 s |
+| `python -m build` | sdist + wheel built; clean-venv import awaits the PR CI package job |
+| `python examples/local_task.py` | `success`, `verified: True` (3 actions) |
+| `python scripts/benchmark.py --iterations 5` | snapshot p50 ≈ 4.5 ms, full local run ≈ 0.52 s (3 actions) |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
 the upstream TypeScript comparison. `scripts/benchmark.py` records

@@ -126,6 +126,12 @@ async def measure_full_run() -> dict[str, Any]:
                     return next(key for key in criteria if key.startswith("search_"))
                 if call == 2:
                     return next(
+                        key
+                        for key, description in criteria.items()
+                        if key.startswith("submit_") and "submit the search now" in description
+                    )
+                if call == 3:
+                    return next(
                         key for key in criteria if key.startswith("click_") and "Annual Report 2026" in criteria[key]
                     )
                 return "done"

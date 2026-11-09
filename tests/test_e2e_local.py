@@ -161,6 +161,8 @@ async def test_full_local_task_reaches_a_verified_result() -> None:
                     if call == 1:
                         return _find(criteria, "search_")
                     if call == 2:
+                        return _find(criteria, "submit_", containing="submit the search now")
+                    if call == 3:
                         return _find(criteria, "click_", containing="Annual Report 2026")
                     return "done"
 
@@ -177,8 +179,8 @@ async def test_full_local_task_reaches_a_verified_result() -> None:
                 )
                 assert result.status is RunStatus.SUCCESS, result.reason
                 assert result.verified is True
-                assert result.steps >= 2
-                assert transport.calls >= 2
+                assert result.steps >= 3
+                assert transport.calls >= 3
                 assert page.url.endswith("/detail")
 
                 html = await page.content()

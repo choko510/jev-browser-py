@@ -80,6 +80,11 @@ _STOPWORDS = frozenset(
 )
 _NEGATIONS = ("not found", "no results", "0 results", "page not found", "error")
 
+
+def _tokens(text: str) -> set[str]:
+    """Content-token overlap for diagnostics only; never a success criterion."""
+    return {token for token in _TOKEN.findall(text.lower()) if token not in _STOPWORDS}
+
 _ECHO_PATTERNS = (
     re.compile(r'results?\s+for\s+"[^"]{0,200}"', re.IGNORECASE),
     re.compile(r"results?\s+for\s+“[^”]{0,200}”", re.IGNORECASE),
@@ -104,11 +109,6 @@ class VerificationError(RuntimeError):
 @runtime_checkable
 class Verifier(Protocol):
     async def verify(self, *, goal: str, before: PageSnapshot, after: PageSnapshot) -> VerificationResult: ...
-
-
-def _tokens(text: str) -> set[str]:
-    """Content tokens only: function words never decide verification."""
-    return {token for token in _TOKEN.findall(text.lower()) if token not in _STOPWORDS}
 
 
 def strip_echoes(text: str) -> str:
@@ -144,11 +144,10 @@ class RuleBasedVerifier:
 
     Rules, in order:
 
-    1. A quoted/sought phrase from the goal must appear in the final excerpt,
-       and must not have appeared identically in the starting excerpt (unless
-       the goal explicitly asks to confirm it was already there).
-    2. Failing an explicit phrase, every content token of the goal must be
-       represented, which catches "navigate to <destination>" tasks.
+    1. Every explicit phrase extracted from the goal must appear in the final
+       page evidence after search-query echoes are removed.
+    2. A goal without an explicit phrase is not verified by word overlap alone;
+       callers should provide a task-specific :class:`CallableVerifier`.
     3. A page that reports not-found/error language never verifies.
     """
 
@@ -182,43 +181,35 @@ class RuleBasedVerifier:
         evidence: list[EvidenceRef] = [
             EvidenceRef(kind="snapshot", ref=after.snapshot_id, detail=after.url),
         ]
-        for phrase in expectations:
-            lowered = phrase.lower()
-            if lowered in haystack:
-                evidence.append(EvidenceRef(kind="phrase", ref=phrase[:120], detail="found on the final page"))
-                return VerificationResult(
-                    verified=True,
-                    detail=f"sought phrase {phrase[:80]!r} is present on the final page",
-                    evidence=tuple(evidence),
+        if not expectations:
+            goal_tokens = _tokens(goal)
+            overlap = goal_tokens & _tokens(haystack)
+            if goal_tokens and len(overlap) / len(goal_tokens) >= self.min_token_overlap:
+                evidence.append(
+                    EvidenceRef(
+                        kind="tokens",
+                        ref=",".join(sorted(overlap))[:200],
+                        detail="diagnostic overlap only; it does not verify task success",
+                    )
                 )
-        if expectations:
             return VerificationResult(
                 verified=False,
-                detail="none of the sought phrases appear on the final page",
+                detail="no explicit verification target could be extracted; use a task-specific verifier",
                 evidence=tuple(evidence),
             )
-        goal_tokens = _tokens(goal)
-        if not goal_tokens:
-            return VerificationResult(verified=False, detail="the goal contains no verifiable content tokens")
-        page_tokens = _tokens(haystack)
-        overlap = goal_tokens & page_tokens
-        ratio = len(overlap) / len(goal_tokens)
-        if ratio >= self.min_token_overlap:
-            evidence.append(
-                EvidenceRef(
-                    kind="tokens",
-                    ref=",".join(sorted(overlap))[:200],
-                    detail=f"{ratio:.0%} of goal tokens appear on the final page",
-                )
-            )
+        missing = [phrase for phrase in expectations if phrase.lower() not in haystack]
+        for phrase in expectations:
+            if phrase not in missing:
+                evidence.append(EvidenceRef(kind="phrase", ref=phrase[:120], detail="found on the final page"))
+        if missing:
             return VerificationResult(
-                verified=True,
-                detail=f"{len(overlap)}/{len(goal_tokens)} goal tokens appear on the final page",
+                verified=False,
+                detail="explicit evidence missing: " + ", ".join(phrase[:80] for phrase in missing),
                 evidence=tuple(evidence),
             )
         return VerificationResult(
-            verified=False,
-            detail=f"only {len(overlap)}/{len(goal_tokens)} goal tokens appear on the final page",
+            verified=True,
+            detail=f"all {len(expectations)} explicit verification phrases are present on the final page",
             evidence=tuple(evidence),
         )
 

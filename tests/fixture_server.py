@@ -63,6 +63,27 @@ class _Handler(BaseHTTPRequestHandler):
         if parts.path == "/":
             self._send(200, _INDEX)
             return
+        if parts.path == "/redirect-unlisted":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://unlisted.example:{self.server.server_address[1]}/detail",
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if parts.path == "/subresource":
+            port = self.server.server_address[1]
+            self._send(200, f'<html><body><img src="http://unlisted.example:{port}/pixel"></body></html>')
+            return
+        if parts.path == "/pixel":
+            body = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parts.path == "/results":
             query = (parse_qs(parts.query).get("q") or [""])[0]
             if not query.strip():

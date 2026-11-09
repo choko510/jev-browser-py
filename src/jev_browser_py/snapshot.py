@@ -132,6 +132,7 @@ _EXTRACT_SCRIPT = """
       (tag === "button" && (typeAttr === "submit" || (!el.hasAttribute("type") && el.closest("form") !== null))) ||
       (tag === "input" && typeAttr === "submit");
     const enterSubmittable = typeable && tag !== "textarea";
+    const formMethod = (el.getAttribute("formmethod") || el.form?.method || "").toLowerCase();
     if (!clickable && !typeable && !selectable && !passwordInput) continue;
     const attr = `j${out.length + 1}`;
     el.setAttribute("data-jev-id", attr);
@@ -143,7 +144,7 @@ _EXTRACT_SCRIPT = """
       : undefined;
     out.push({
       attr, tag, role: roleAttr || tag, text: label.slice(0, labelCap), href,
-      typeAttr, clickable, typeable, selectable, searchField, submitControl,
+      typeAttr, formMethod, clickable, typeable, selectable, searchField, submitControl,
       enterSubmittable, passwordInput: passwordInput || undefined, options, state, disabled,
     });
   }
@@ -229,6 +230,11 @@ class Snapshotter:
     @property
     def redactor(self) -> Redactor:
         return self._redactor
+
+    @property
+    def page(self) -> Any:
+        """The Playwright Page observed by this snapshotter."""
+        return self._page
 
     def ensure_secrets(self, secrets: list[str]) -> None:
         """Guarantee these values are redacted before any observation.
@@ -344,6 +350,7 @@ class Snapshotter:
             text=self._redact(element.text)[: self._options.label_cap],
             href=self._redact(element.href),
             type_attr=element.type_attr,
+            form_method=element.form_method,
             clickable=element.clickable,
             typeable=element.typeable,
             selectable=element.selectable,

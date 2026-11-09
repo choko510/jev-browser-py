@@ -82,17 +82,32 @@ def test_a_not_found_page_never_verifies() -> None:
     assert result.verified is False
 
 
-def test_navigation_to_a_named_destination_verifies_by_tokens() -> None:
+def test_token_overlap_without_explicit_evidence_does_not_verify() -> None:
     before, after = _pair(
         before_text="Home page with links.",
-        after_text="Contact us — write to the support team today.",
+        after_text="Search results: contact support team listed in these matches.",
     )
     result = RuleBasedVerifier().verify_sync(
         goal="go to the contact page and confirm the support team is listed",
         before=before,
         after=after,
     )
-    assert result.verified is True
+    assert result.verified is False
+    assert "explicit" in result.detail.lower()
+
+
+def test_every_explicit_expectation_must_be_present() -> None:
+    before, after = _pair(
+        before_text="Home page.",
+        after_text="Annual Report 2026 is listed, but no revenue value is shown.",
+    )
+    result = RuleBasedVerifier().verify_sync(
+        goal='find "Annual Report 2026" and verify "revenue of 42 million"',
+        before=before,
+        after=after,
+    )
+    assert result.verified is False
+    assert "revenue of 42 million" in result.detail
 
 
 def test_an_unrelated_page_does_not_verify() -> None:

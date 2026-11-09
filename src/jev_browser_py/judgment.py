@@ -275,18 +275,28 @@ def side_effect_of(
         if action_key in _CONTROL_ACTIONS:
             return SideEffectClass.READ
         return SideEffectClass.AMBIGUOUS
-    if candidate.kind is ActionKind.TYPE:
-        return SideEffectClass.LOCAL_INPUT
-    if candidate.kind in (ActionKind.SEARCH, ActionKind.SELECT):
+    if candidate.kind in (ActionKind.TYPE, ActionKind.SEARCH, ActionKind.SELECT):
         return SideEffectClass.LOCAL_INPUT
     if candidate.kind is ActionKind.SUBMIT:
+        if candidate.submit_via == "enter" and candidate.search_field and candidate.form_method == "get":
+            return SideEffectClass.READ
         return SideEffectClass.EXTERNAL_WRITE
     lowered = f"{candidate.description} {goal}".lower()
     if any(word in lowered for word in HIGH_RISK_WORDS["external_write"]):
         return SideEffectClass.EXTERNAL_WRITE
     if any(word in lowered for word in HIGH_RISK_WORDS["ambiguous"]):
         return SideEffectClass.AMBIGUOUS
-    return SideEffectClass.READ
+    if candidate.kind is ActionKind.CLICK:
+        if candidate.is_navigation:
+            return SideEffectClass.READ
+        if (
+            candidate.target_tag == "summary"
+            or candidate.target_type in {"checkbox", "radio"}
+            or candidate.target_role in {"checkbox", "radio", "switch"}
+        ):
+            return SideEffectClass.LOCAL_INPUT
+        return SideEffectClass.AMBIGUOUS
+    return SideEffectClass.AMBIGUOUS
 
 
 def parse_proposal(

@@ -47,6 +47,7 @@ def _space(text: str, *, kind: str = "button", submit: bool = False):  # type: i
                 tag=kind,
                 role=kind,
                 text=text,
+                href="/docs" if kind == "a" else "",
                 type_attr="submit" if submit else "",
                 clickable=True,
                 submit_control=submit,
@@ -56,7 +57,7 @@ def _space(text: str, *, kind: str = "button", submit: bool = False):  # type: i
 
 
 def test_read_click_is_allowed() -> None:
-    space = _space("Documentation")
+    space = _space("Documentation", kind="a")
     snapshot = make_snapshot(action_space=space)
     assert default_policy().decide(proposal=_proposal(space, "click_e1"), snapshot=snapshot).allowed
 
@@ -76,6 +77,48 @@ def test_ambiguous_can_be_opened_explicitly() -> None:
     assert decision.allowed is True
 
 
+def test_search_submit_for_post_form_requires_external_write_permission() -> None:
+    space = build_action_space(
+        [
+            RawElement(
+                attr="j1",
+                tag="input",
+                role="searchbox",
+                text="Search",
+                type_attr="search",
+                typeable=True,
+                search_field=True,
+                enter_submittable=True,
+                form_method="post",
+            )
+        ]
+    )
+    submit = next(candidate for candidate in space.candidates if candidate.kind is ActionKind.SUBMIT)
+    assert side_effect_of(submit.action_key, submit) is SideEffectClass.EXTERNAL_WRITE
+    assert default_policy().decide(proposal=_proposal(space, submit.action_key), snapshot=make_snapshot(action_space=space)).allowed is False
+
+
+def test_get_search_submit_remains_a_read_action() -> None:
+    space = build_action_space(
+        [
+            RawElement(
+                attr="j1",
+                tag="input",
+                role="searchbox",
+                text="Search",
+                type_attr="search",
+                typeable=True,
+                search_field=True,
+                enter_submittable=True,
+                form_method="get",
+            )
+        ]
+    )
+    submit = next(candidate for candidate in space.candidates if candidate.kind is ActionKind.SUBMIT)
+    assert side_effect_of(submit.action_key, submit) is SideEffectClass.READ
+    assert default_policy().decide(proposal=_proposal(space, submit.action_key), snapshot=make_snapshot(action_space=space)).allowed is True
+
+
 def test_external_write_can_be_opened_explicitly() -> None:
     space = _space("Place order", submit=True)
     snapshot = make_snapshot(action_space=space)
@@ -83,6 +126,16 @@ def test_external_write_can_be_opened_explicitly() -> None:
         proposal=_proposal(space, "submit_e1"), snapshot=snapshot
     )
     assert decision.allowed is True
+
+
+def test_unrecognized_state_changing_button_is_not_assumed_read_only() -> None:
+    space = _space("Save settings")
+    snapshot = make_snapshot(action_space=space)
+    proposal = _proposal(space, "click_e1")
+
+    assert side_effect_of("click_e1", space.candidates[0]) is SideEffectClass.AMBIGUOUS
+    decision = default_policy().decide(proposal=proposal, snapshot=snapshot)
+    assert decision.allowed is False
 
 
 def test_deny_actions_list_is_honoured() -> None:
@@ -136,7 +189,7 @@ def test_denial_error_and_description_never_leak_secrets() -> None:
     ],
 )
 def test_side_effect_classification(text: str, expected: SideEffectClass) -> None:
-    space = _space(text)
+    space = _space(text, kind="a" if expected is SideEffectClass.READ else "button")
     candidate = space.candidates[0]
     assert side_effect_of("click_e1", candidate) is expected
 
@@ -150,7 +203,7 @@ def test_scroll_and_back_are_read_only_controls() -> None:
 def test_authorize_is_awaitable_for_host_adapters() -> None:
     import asyncio
 
-    space = _space("Documentation")
+    space = _space("Documentation", kind="a")
     snapshot = make_snapshot(action_space=space)
     decision = asyncio.run(default_policy().authorize(proposal=_proposal(space, "click_e1"), snapshot=snapshot))
     assert decision.allowed is True

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .contracts import (
+    ActionKind,
     ActionOutcome,
     ActionOutcomeState,
     ActionProposal,
@@ -54,7 +55,7 @@ from .policy import ActionPolicy, default_policy
 from .questions import build_criteria, judgment_state, select_option_question, step_questions
 from .redaction import Redactor
 from .snapshot import Snapshotter
-from .transport import JevTransport
+from .transport import JevTransport, TransportReply
 from .typing import TextGenerationError, TextGenerator, is_sensitive_field
 from .verifier import RuleBasedVerifier, VerificationError, Verifier
 
@@ -107,6 +108,7 @@ class ExecutorProtocol:
         *,
         proposal: ActionProposal,
         snapshot: PageSnapshot,
+        current_snapshot: PageSnapshot | None = None,
         typed_text: str | None = None,
         select_option_index: int | None = None,
     ) -> ActionOutcome:  # pragma: no cover
@@ -165,8 +167,8 @@ async def _judge_select(
     snapshot: PageSnapshot,
     proposal: ActionProposal,
     deadline: float,
-) -> int:
-    """Second-stage option choice for a native `<select>`."""
+) -> TransportReply:
+    """Fetch the second-stage option judgment for a native `<select>`."""
     candidate = proposal.candidate
     if candidate is None or not candidate.options:
         raise InvalidJudgmentError("select action has no options to choose from")
@@ -181,7 +183,7 @@ async def _judge_select(
         questions={"option": question},
         deadline=deadline,
     )
-    return validate_select_reply(reply, option_count=len(candidate.options))
+    return reply
 
 
 async def run(
@@ -198,11 +200,64 @@ async def run(
     secrets: Sequence[str] = (),
     cancel_token: CancelToken | None = None,
 ) -> RunResult:
-    """Execute one goal under a finite budget and return a terminal report.
+    """Run one serialized goal on the Page supplied by the snapshotter/executor.
 
     The caller owns the browser. This function never launches or closes a
-    browser; it only observes and acts on the page already provided.
+    browser; it automatically holds that Page's shared action lock for the run.
+    Do not wrap `run()` in `BrowserSession.action_lock` a second time.
     """
+    snapshot_page = getattr(snapshotter, "page", None)
+    executor_page = getattr(executor, "page", None)
+    if snapshot_page is not None and executor_page is not None and snapshot_page is not executor_page:
+        raise ValueError("snapshotter and executor must target the same Page")
+    page = snapshot_page if snapshot_page is not None else executor_page
+    if page is None:
+        return await _run_unlocked(
+            goal,
+            transport=transport,
+            snapshotter=snapshotter,
+            executor=executor,
+            policy=policy,
+            verifier=verifier,
+            limits=limits,
+            options=options,
+            text_generator=text_generator,
+            secrets=secrets,
+            cancel_token=cancel_token,
+        )
+    from .session import _page_action_lock
+
+    async with _page_action_lock(page):
+        return await _run_unlocked(
+            goal,
+            transport=transport,
+            snapshotter=snapshotter,
+            executor=executor,
+            policy=policy,
+            verifier=verifier,
+            limits=limits,
+            options=options,
+            text_generator=text_generator,
+            secrets=secrets,
+            cancel_token=cancel_token,
+        )
+
+
+async def _run_unlocked(
+    goal: str,
+    *,
+    transport: JevTransport,
+    snapshotter: Snapshotter,
+    executor: Any,
+    policy: ActionPolicy | None = None,
+    verifier: Verifier | None = None,
+    limits: RunLimits | None = None,
+    options: RunOptions | None = None,
+    text_generator: TextGenerator | None = None,
+    secrets: Sequence[str] = (),
+    cancel_token: CancelToken | None = None,
+) -> RunResult:
+    """Execute one goal; the public wrapper owns the Page action lock."""
     resolved_limits = limits or RunLimits()
     resolved_options = options or RunOptions()
     configured_secrets = list(dict.fromkeys(secrets))
@@ -258,6 +313,13 @@ async def run(
             trace=tuple(trace),
             error_code=error_code,
         )
+
+    def _stop_after_wait() -> RunResult | None:
+        if context.cancel_token is not None and context.cancel_token.cancelled:
+            return _result(RunStatus.CANCELLED, context.cancel_token.reason, error_code=ErrorCode.CANCELLED)
+        if _clock() >= deadline:
+            return _result(RunStatus.TIMEOUT, "the run deadline expired before the next action", error_code=ErrorCode.TIMEOUT)
+        return None
 
     step_number = 0
     while True:
@@ -360,6 +422,14 @@ async def run(
             )
         )
 
+        if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
+            trace[-1] = trace[-1].model_copy(update={"outcome": "budget_exceeded", "detail": "model cost limit reached"})
+            return _result(
+                RunStatus.BUDGET_EXCEEDED,
+                f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
+                error_code=ErrorCode.BUDGET_EXCEEDED,
+            )
+
         # ── Stop gates, before any action is considered ─────────────────────
         baseline = first_snapshot or snapshot
         if proposal.is_done():
@@ -409,24 +479,123 @@ async def run(
                 f"policy denied {proposal.action_key}: {decision.reason}",
                 error_code=ErrorCode.POLICY_DENIED,
             )
+        stop_result = _stop_after_wait()
+        if stop_result is not None:
+            return stop_result
+        if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
+            return _result(
+                RunStatus.BUDGET_EXCEEDED,
+                f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
+                error_code=ErrorCode.BUDGET_EXCEEDED,
+            )
 
-        # ── Prepare typed text (before taking the action lock) ─────────────
+        # Native-select option choice is a second Jev call and consumes the same
+        # call, token, cost, cancellation, and wall-clock budgets as the primary
+        # judgment. It must finish before the selected option can be executed.
+        select_index: int | None = None
+        prep_error: str | None = None
+        candidate = proposal.candidate
+        if candidate is not None and candidate.kind is ActionKind.SELECT:
+            if not context.options.allow_select:
+                prep_error = "select actions are disabled by configuration"
+            elif not candidate.options:
+                prep_error = "the select control offered no options"
+            elif jev_calls >= resolved_limits.max_jev_calls:
+                return _result(
+                    RunStatus.BUDGET_EXCEEDED,
+                    f"Jev call budget of {resolved_limits.max_jev_calls} exhausted before select choice",
+                    error_code=ErrorCode.BUDGET_EXCEEDED,
+                )
+            else:
+                jev_calls += 1
+                try:
+                    select_reply = await _judge_select(
+                        context=context,
+                        snapshot=snapshot,
+                        proposal=proposal,
+                        deadline=deadline,
+                    )
+                    select_index = validate_select_reply(select_reply, option_count=len(candidate.options))
+                    usage = Usage(
+                        input_tokens=usage.input_tokens + select_reply.input_tokens,
+                        output_tokens=usage.output_tokens + select_reply.output_tokens,
+                    )
+                except TransportError as error:
+                    return _result(RunStatus.ERROR, error.message, error_code=ErrorCode.TRANSPORT_FAILED)
+                except TimeoutError:
+                    return _result(RunStatus.TIMEOUT, "the select judgment exceeded the run deadline", error_code=ErrorCode.TIMEOUT)
+                except InvalidJudgmentError as error:
+                    return _result(
+                        RunStatus.INVALID_JUDGMENT,
+                        "the select reply was invalid; no option was selected: " + error.message,
+                        error_code=ErrorCode.INVALID_JUDGMENT,
+                    )
+                except CancelledError:
+                    return _result(RunStatus.CANCELLED, "cancelled while choosing a select option", error_code=ErrorCode.CANCELLED)
+                stop_result = _stop_after_wait()
+                if stop_result is not None:
+                    return stop_result
+                if usage.estimated_cost_usd() > resolved_limits.max_cost_usd:
+                    return _result(
+                        RunStatus.BUDGET_EXCEEDED,
+                        f"cost budget of ${resolved_limits.max_cost_usd:.4f} exceeded",
+                        error_code=ErrorCode.BUDGET_EXCEEDED,
+                    )
+        else:
+            prep_error = None
+
+        if candidate is not None and candidate.kind is ActionKind.SELECT and prep_error is not None:
+            trace[-1] = trace[-1].model_copy(update={"outcome": "input_unavailable", "detail": prep_error})
+            return _result(RunStatus.NEEDS_HUMAN, prep_error, error_code=ErrorCode.NEEDS_HUMAN)
+
         typed_text, select_index, prep_error = await _prepare_action_input(
-            context=context, proposal=proposal, snapshot=snapshot
+            context=context,
+            proposal=proposal,
+            snapshot=snapshot,
+            select_option_index=select_index,
         )
         if prep_error is not None:
             trace[-1] = trace[-1].model_copy(update={"outcome": "input_unavailable", "detail": prep_error})
-            return _result(
-                RunStatus.NEEDS_HUMAN,
-                prep_error,
-                error_code=ErrorCode.NEEDS_HUMAN,
-            )
+            return _result(RunStatus.NEEDS_HUMAN, prep_error, error_code=ErrorCode.NEEDS_HUMAN)
+        stop_result = _stop_after_wait()
+        if stop_result is not None:
+            return stop_result
+
+        live_snapshot = snapshot
+        if proposal.candidate is not None:
+            try:
+                live_snapshot = await snapshotter.observe()
+            except Exception as error:  # noqa: BLE001 - current target must be observable to act
+                trace[-1] = trace[-1].model_copy(update={"outcome": "stale", "detail": "live target could not be re-observed"})
+                return _result(
+                    RunStatus.BLOCKED,
+                    "the live target could not be re-observed; no action was executed",
+                    error_code=_error_code_of(error),
+                )
+            live_matches = [
+                live
+                for live in live_snapshot.action_space.candidates
+                if live.stamp == proposal.candidate.stamp and live.kind is proposal.candidate.kind
+            ]
+            if len(live_matches) != 1 or live_matches[0].fingerprint != proposal.candidate.fingerprint:
+                trace[-1] = trace[-1].model_copy(
+                    update={"outcome": "stale", "detail": "the candidate fingerprint changed before execution"}
+                )
+                return _result(
+                    RunStatus.BLOCKED,
+                    "the target changed before execution; nothing was clicked",
+                    error_code=ErrorCode.STALE_TARGET,
+                )
+        stop_result = _stop_after_wait()
+        if stop_result is not None:
+            return stop_result
 
         # ── Act ─────────────────────────────────────────────────────────────
         try:
             outcome = await context.executor.execute_one(
                 proposal=proposal,
                 snapshot=snapshot,
+                current_snapshot=live_snapshot,
                 typed_text=typed_text,
                 select_option_index=select_index,
             )
@@ -530,9 +699,13 @@ async def _verify(
 
 
 async def _prepare_action_input(
-    *, context: RunContext, proposal: ActionProposal, snapshot: PageSnapshot
+    *,
+    context: RunContext,
+    proposal: ActionProposal,
+    snapshot: PageSnapshot,
+    select_option_index: int | None = None,
 ) -> tuple[str | None, int | None, str | None]:
-    """Generate typed text or pick a select option, before the action lock.
+    """Prepare typed text after any budgeted select judgment has completed.
 
     Returns `(typed_text, select_index, error)`. An error means the run cannot
     safely proceed: a field that needs a human value must not be filled with a
@@ -548,18 +721,9 @@ async def _prepare_action_input(
             return (None, None, "select actions are disabled by configuration")
         if not candidate.options:
             return (None, None, "the select control offered no options")
-        try:
-            index = await _judge_select(
-                context=context,
-                snapshot=snapshot,
-                proposal=proposal,
-                deadline=_clock() + context.limits.max_seconds,
-            )
-        except TransportError:
-            return (None, None, "the option judgment call failed")
-        except InvalidJudgmentError:
-            return (None, None, "the option judgment was invalid; nothing was selected")
-        return (None, index, None)
+        if select_option_index is None:
+            return (None, None, "no validated select option was supplied")
+        return (None, select_option_index, None)
     if candidate.kind.value not in {"type", "search"}:
         return (None, None, None)
     if not context.options.allow_typed_input:

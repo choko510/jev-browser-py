@@ -22,6 +22,8 @@ import asyncio
 import contextlib
 import ipaddress
 import socket
+import threading
+import weakref
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,18 +46,18 @@ __all__ = [
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-_DEFAULT_ALLOWED_SCHEMES = frozenset({"http", "https", "about", "data", "blob"})
+_DEFAULT_ALLOWED_SCHEMES = frozenset({"http", "https", "ws", "wss", "about", "data", "blob"})
 
 
 @dataclass
 class NetworkPolicy:
     """Allow-list based egress policy for one session.
 
-    **This is not an egress firewall.** Chromium issues requests the Python
-    layer never sees (preconnect, favicons, service workers). Use it to catch
-    accidents and to document intent, and pair it with real isolation
-    (container, proxy, or host firewall) before exposing the library to
-    untrusted tasks on the public internet.
+    **This is not an egress firewall.** The Context route checks observed
+    HTTP/WebSocket destinations, but browser preconnects and service-worker or
+    platform traffic may bypass it. HTTP redirect responses are blocked rather
+    than followed. Use real isolation (container, proxy, or host firewall)
+    before exposing the library to untrusted tasks on the public internet.
 
     Defaults are intentionally restrictive: loopback fixtures are allowed,
     arbitrary internet hosts are allowed only when explicitly listed.
@@ -84,7 +86,10 @@ class NetworkPolicy:
         )
 
     def origin_allowed(self, url: str) -> bool:
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return False
         scheme = parts.scheme.lower()
         if scheme not in self.allowed_schemes:
             return False
@@ -93,16 +98,13 @@ class NetworkPolicy:
         host = (parts.hostname or "").lower()
         if not host:
             return False
-        origin = f"{scheme}://{parts.netloc}".lower()
-        if origin in self.allowed_origins:
-            return True
-        if host in self.allowed_hosts:
-            return True
         if self.allow_loopback and host in LOCAL_HOSTS:
             return True
         if is_private_host(host):
             return self.allow_private
-        return bool(self.allowed_origins or self.allowed_hosts)
+        origin_scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+        origin = f"{origin_scheme}://{parts.netloc}".lower()
+        return origin in self.allowed_origins or host in self.allowed_hosts
 
     def check(self, url: str) -> None:
         if not self.origin_allowed(url):
@@ -201,6 +203,33 @@ async def _safe_abort(route: Any) -> None:
         return
 
 
+_PAGE_LOCKS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Lock]] = {}
+_PAGE_LOCKS_GUARD = threading.RLock()
+
+
+def _forget_page_lock(key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_LOCKS.get(key)
+        if current is not None and current[0] is reference:
+            del _PAGE_LOCKS[key]
+
+
+def _page_action_lock(page: Any) -> asyncio.Lock:
+    """Return one shared action lock for every wrapper around a Page object."""
+    key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_LOCKS.get(key)
+        if current is not None and current[0]() is page:
+            return current[1]
+        try:
+            reference = weakref.ref(page, lambda ref: _forget_page_lock(key, ref))
+        except TypeError as error:
+            raise TypeError("page objects must support weak references for safe action serialization") from error
+        lock = asyncio.Lock()
+        _PAGE_LOCKS[key] = (reference, lock)
+        return lock
+
+
 @dataclass
 class BrowserSession:
     """One owned page plus its policy, lock, and snapshot bound method."""
@@ -208,13 +237,15 @@ class BrowserSession:
     page: Any
     owner: BrowserOwner
     network: NetworkPolicy = field(default_factory=NetworkPolicy)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _lock: asyncio.Lock = field(init=False, repr=False)
     _closed: bool = field(default=False, repr=False)
-    _guard_tasks: list[asyncio.Task[None]] = field(default_factory=list, repr=False)
+
+    def __post_init__(self) -> None:
+        self._lock = _page_action_lock(self.page)
 
     @property
     def action_lock(self) -> asyncio.Lock:
-        """Serialize actions on this page; concurrent actions are forbidden."""
+        """Shared Page lock; `run()` acquires it automatically for the whole run."""
         return self._lock
 
     async def navigate(self, url: str, *, timeout_ms: int = 15_000) -> None:
@@ -227,63 +258,86 @@ class BrowserSession:
         except Exception as error:
             raise NetworkGuardError("navigation failed before the page could be trusted") from error
 
-    def install_guard(self) -> None:
-        """Route-level guard: abort disallowed documents and subresources.
+    async def install_guard(self) -> None:
+        """Install awaited context-wide HTTP and WebSocket policy routes.
 
-        The Playwright async API requires an awaitable route handler; a sync
-        handler silently stalls every request it intercepts, so this is
-        registered as a coroutine function.
-
-        Best-effort by design: see :class:`NetworkPolicy` for the limits of a
-        Python-side guard inside a real browser.
+        The guard is installed before any owned-page navigation and applies to
+        every HTTP resource type and popup in the Context. Redirect responses
+        are blocked because Playwright does not re-run the route handler for
+        every server redirect hop. Playwright also has no API to remove
+        WebSocket routes; on an injected Context this policy remains attached
+        until the caller closes that Context. This is not an egress firewall.
         """
         context = self.owner.context
-        page = self.page
-        if page is None:
-            return
+        if context is None or self.page is None:
+            raise NetworkGuardError("a browser context is required to install the network guard")
+        websocket_route = getattr(context, "route_web_socket", None)
+        if websocket_route is None:
+            raise NetworkGuardError("this Playwright Context cannot enforce WebSocket policy")
         policy = self.network
 
         async def _route_handler(route: Any) -> None:
             try:
-                request = route.request
-                request_url = str(getattr(request, "url", "") or "")
-                resource_type = str(getattr(request, "resource_type", "") or "")
+                request_url = str(getattr(route.request, "url", "") or "")
             except Exception:  # noqa: BLE001 - a torn-down request
                 await _safe_abort(route)
                 return
-            if resource_type == "document" and not policy.origin_allowed(request_url):
-                await _safe_abort(route)
-                return
-            if policy.block_downloads and "/download" in request_url.lower():
+            try:
+                allowed = policy.origin_allowed(request_url)
+            except Exception:  # noqa: BLE001 - malformed or unresolvable URLs fail closed
+                allowed = False
+            if not allowed or (policy.block_downloads and "/download" in request_url.lower()):
                 await _safe_abort(route)
                 return
             try:
-                await route.continue_()
+                # Playwright does not route every server-side redirect hop back
+                # through the handler. Fetch one hop only and fail closed on a
+                # redirect instead of allowing an unchecked second request.
+                response = await route.fetch(max_redirects=0)
+            except Exception:  # noqa: BLE001 - a failed fetch is never retried
+                await _safe_abort(route)
+                return
+            if response.status in {300, 301, 302, 303, 307, 308} and response.headers.get("location"):
+                await _safe_abort(route)
+                return
+            if policy.block_downloads and "attachment" in response.headers.get("content-disposition", "").lower():
+                await _safe_abort(route)
+                return
+            try:
+                await route.fulfill(response=response)
             except Exception:  # noqa: BLE001 - the request already completed
                 return
 
-        async def _guard() -> None:
+        async def _websocket_handler(route: Any) -> None:
             try:
-                await page.route("**/*", _route_handler)
-            except Exception:  # noqa: BLE001 - a page without routing support
+                websocket_url = str(getattr(route, "url", "") or "")
+                allowed = policy.origin_allowed(websocket_url)
+            except Exception:  # noqa: BLE001 - malformed or unresolvable URLs fail closed
+                allowed = False
+            if not allowed:
+                await route.close(code=1008, reason="blocked by the session network policy")
                 return
+            await route.connect()
 
-        if context is None and page is None:
-            return
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - no loop means no page anyway
-            return
-        self._guard_tasks.append(loop.create_task(_guard()))
+            await websocket_route("**/*", _websocket_handler)
+            await context.route("**/*", _route_handler)
+        except Exception as error:  # noqa: BLE001 - failure to install is fail-closed
+            raise NetworkGuardError("the browser network guard could not be installed") from error
 
     async def close(self) -> None:
+        """Close only owned browser resources after this Page leaves the run lock.
+
+        Routes attached to an injected Context remain until that caller-owned
+        Context closes; Playwright cannot remove its WebSocket route.
+        """
         if self._closed:
             return
-        self._closed = True
-        for task in self._guard_tasks:
-            task.cancel()
-        self._guard_tasks.clear()
-        await self.owner.close()
+        async with self.action_lock:
+            if self._closed:
+                return
+            self._closed = True
+            await self.owner.close()
 
     @property
     def closed(self) -> bool:
@@ -327,8 +381,12 @@ async def open_session(
             owns_page=False,
         )
         session = BrowserSession(page=page, owner=owner, network=policy)
-        if install_guard:
-            session.install_guard()
+        try:
+            if install_guard:
+                await session.install_guard()
+        except Exception:
+            await session.close()
+            raise
         return session
     assert start_url is not None
     policy.check(start_url)
@@ -337,28 +395,50 @@ async def open_session(
     except ImportError as error:  # pragma: no cover - declared dependency
         raise NetworkGuardError("playwright is not installed") from error
     playwright = await async_playwright().start()
+    browser: Any | None = None
+    context: Any | None = None
+    owned_page: Any | None = None
+    owned_session: BrowserSession | None = None
     try:
         launcher = getattr(playwright, browser_type)
         browser = await launcher.launch(headless=headless)
-        context = await browser.new_context(**(context_options or {}))
+        browser_context_options = dict(context_options or {})
+        if install_guard:
+            if browser_context_options.get("service_workers", "block") != "block":
+                raise NetworkGuardError("service_workers must be blocked when the network guard is enabled")
+            browser_context_options["service_workers"] = "block"
+        context = await browser.new_context(**browser_context_options)
         owned_page = await context.new_page()
-        await owned_page.goto(start_url, wait_until="domcontentloaded")
+        owner = BrowserOwner(
+            browser=browser,
+            context=context,
+            page=owned_page,
+            owns_browser=True,
+            owns_context=True,
+            owns_page=True,
+            playwright=playwright,
+        )
+        owned_session = BrowserSession(page=owned_page, owner=owner, network=policy)
+        if install_guard:
+            await owned_session.install_guard()
+        await owned_session.navigate(start_url)
+        return owned_session
     except Exception:
-        await playwright.stop()
+        if owned_session is not None:
+            await owned_session.close()
+        else:
+            if owned_page is not None:
+                with contextlib.suppress(Exception):
+                    await owned_page.close()
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    await context.close()
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    await browser.close()
+            with contextlib.suppress(Exception):
+                await playwright.stop()
         raise
-    owner = BrowserOwner(
-        browser=browser,
-        context=context,
-        page=owned_page,
-        owns_browser=True,
-        owns_context=True,
-        owns_page=True,
-        playwright=playwright,
-    )
-    session = BrowserSession(page=owned_page, owner=owner, network=policy)
-    if install_guard:
-        session.install_guard()
-    return session
 
 
 def assert_allowed_navigation(policy: NetworkPolicy, urls: Iterable[str]) -> None:

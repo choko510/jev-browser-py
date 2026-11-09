@@ -177,10 +177,80 @@ async def test_cross_origin_navigation_is_blocked_by_the_policy() -> None:
                 await browser.close()
 
 
-async def test_redirect_to_a_private_host_is_refused_before_navigation() -> None:
-    """The destination is checked, so a redirect target is judged on its own."""
+async def test_context_route_blocks_a_real_redirect_to_an_unlisted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from playwright.async_api import async_playwright
     from jev_browser_py.contracts import NetworkGuardError
 
+    public_dns = lambda *_args, **_kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+    ]
+    monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
+    with fixture_server() as base:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--host-resolver-rules=MAP unlisted.example 127.0.0.1"],
+            )
+            context = await browser.new_context()
+            page = await context.new_page()
+            session = await open_session(
+                page=page,
+                network=NetworkPolicy(allowed_origins=(base,), allow_loopback=True),
+            )
+            try:
+                with pytest.raises(NetworkGuardError):
+                    await session.navigate(f"{base}/redirect-unlisted")
+                assert not page.url.endswith("/detail")
+            finally:
+                await session.close()
+                await context.close()
+                await browser.close()
+
+
+async def test_context_guard_blocks_unlisted_subresource(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from playwright.async_api import async_playwright
+
+    public_dns = lambda *_args, **_kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+    ]
+    monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
+    with fixture_server() as base:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--host-resolver-rules=MAP unlisted.example 127.0.0.1"],
+            )
+            context = await browser.new_context()
+            page = await context.new_page()
+            session = await open_session(
+                page=page,
+                network=NetworkPolicy(allowed_origins=(base,), allow_loopback=True),
+            )
+            try:
+                await session.navigate(f"{base}/subresource")
+                await page.wait_for_function("() => document.querySelector('img')?.complete")
+                width = await page.locator("img").evaluate("img => img.naturalWidth")
+                assert width == 0
+            finally:
+                await session.close()
+                await context.close()
+                await browser.close()
+
+
+async def test_redirect_to_a_private_host_is_refused_before_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destination is checked, so a redirect target is judged on its own."""
+    import socket
+
+    from jev_browser_py.contracts import NetworkGuardError
+
+    public_dns = lambda *_args, **_kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))
+    ]
+    monkeypatch.setattr("jev_browser_py.session.socket.getaddrinfo", public_dns)
     policy = NetworkPolicy(allowed_origins=("https://public.example",))
     assert policy.origin_allowed("https://public.example/start") is True
     with pytest.raises(NetworkGuardError):

@@ -59,7 +59,7 @@ def test_submit_controls_never_appear_as_click() -> None:
     assert space.candidates[0].action_key == "submit_e1"
 
 
-def test_search_fields_are_one_action_and_never_submit_twins() -> None:
+def test_search_fields_separate_fill_from_enter_submission() -> None:
     elements = [
         RawElement(
             attr="j1",
@@ -73,7 +73,10 @@ def test_search_fields_are_one_action_and_never_submit_twins() -> None:
         )
     ]
     space = build_action_space(elements)
-    assert [candidate.kind for candidate in space.candidates] == [ActionKind.SEARCH]
+    assert [candidate.kind for candidate in space.candidates] == [ActionKind.SEARCH, ActionKind.SUBMIT]
+    assert space.candidates[0].action_key == "search_e1"
+    assert space.candidates[1].action_key == "submit_e2"
+    assert space.candidates[1].submit_via == "enter"
 
 
 def test_plain_text_field_gets_type_plus_enter_submit_twin() -> None:

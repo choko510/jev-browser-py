@@ -15,7 +15,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .contracts import ActionCandidate, ActionKind, ActionSpace
 from .questions import MAX_ELEMENTS
@@ -33,6 +33,15 @@ __all__ = [
 
 MAX_RAW_ELEMENTS = 2000
 PASSWORD_KIND = "fill_password"
+
+
+def _form_method_value(method: str) -> Literal["get", "post"] | None:
+    normalized = method.lower()
+    if normalized == "get":
+        return "get"
+    if normalized == "post":
+        return "post"
+    return None
 
 _JUNK_NAMES = frozenset(
     {
@@ -98,6 +107,7 @@ class RawElement:
     text: str
     href: str = ""
     type_attr: str = ""
+    form_method: str = ""
     clickable: bool = False
     typeable: bool = False
     selectable: bool = False
@@ -122,6 +132,7 @@ class RawElement:
                 self.text,
                 self.href,
                 self.type_attr,
+                self.form_method,
                 "1" if self.clickable else "0",
                 "1" if self.typeable else "0",
                 "1" if self.selectable else "0",
@@ -157,6 +168,11 @@ def raw_from_mapping(payload: Mapping[str, Any]) -> RawElement:
         text=str(payload.get("text") or ""),
         href=str(payload.get("href") or ""),
         type_attr=str(payload.get("typeAttr") or ""),
+        form_method=(
+            str(payload.get("formMethod") or "").lower()
+            if str(payload.get("formMethod") or "").lower() in {"get", "post"}
+            else ""
+        ),
         clickable=bool(payload.get("clickable")),
         typeable=bool(payload.get("typeable")),
         selectable=bool(payload.get("selectable")),
@@ -172,7 +188,7 @@ def raw_from_mapping(payload: Mapping[str, Any]) -> RawElement:
 
 def _describe(kind: ActionKind, control: str, label: str, element: RawElement) -> str:
     if kind is ActionKind.SEARCH:
-        return f'{control} "{label}" (type into this search box and run the search)'
+        return f'{control} "{label}" (fill the search box without submitting)'
     if kind is ActionKind.SUBMIT:
         return f'{control} "{label}" (submit the form now)'
     if kind is ActionKind.TYPE:
@@ -221,6 +237,7 @@ def build_action_space(
     limit = max(1, min(cap, MAX_ELEMENTS))
     seen_hrefs: set[str] = set()
     candidates: list[ActionCandidate] = []
+    pending_search_submits: list[tuple[RawElement, str]] = []
     for element in raw[:MAX_RAW_ELEMENTS]:
         if len(candidates) >= limit:
             break
@@ -243,6 +260,12 @@ def build_action_space(
                     stamp=element.attr,
                     action_key=f"type_e{index}",
                     enabled=element.enabled,
+                    target_tag=element.tag,
+                    target_role=element.role,
+                    target_type=element.type_attr,
+                    form_method=_form_method_value(element.form_method),
+                    is_navigation=element.tag == "a" and bool(element.href),
+                    search_field=element.search_field,
                 )
             )
             continue
@@ -276,6 +299,12 @@ def build_action_space(
                 options=options,
                 option_indices=option_indices,
                 submit_via="click" if kind is ActionKind.SUBMIT else None,
+                target_tag=element.tag,
+                target_role=element.role,
+                target_type=element.type_attr,
+                form_method=_form_method_value(element.form_method),
+                is_navigation=element.tag == "a" and bool(element.href),
+                search_field=element.search_field,
             )
         )
         if kind is ActionKind.TYPE and element.enter_submittable and len(candidates) < limit:
@@ -290,8 +319,38 @@ def build_action_space(
                     action_key=f"submit_e{index}",
                     enabled=element.enabled,
                     submit_via="enter",
+                    target_tag=element.tag,
+                    target_role=element.role,
+                    target_type=element.type_attr,
+                    form_method=_form_method_value(element.form_method),
+                    is_navigation=False,
+                    search_field=False,
                 )
             )
+        elif kind is ActionKind.SEARCH and element.enter_submittable:
+            pending_search_submits.append((element, label))
+    for element, label in pending_search_submits:
+        if len(candidates) >= limit:
+            break
+        index = len(candidates) + 1
+        candidates.append(
+            ActionCandidate(
+                id=f"e{index}",
+                kind=ActionKind.SUBMIT,
+                description=f'{element.role or element.tag} "{label}" (submit the search now)',
+                fingerprint=element.fingerprint(),
+                stamp=element.attr,
+                action_key=f"submit_e{index}",
+                enabled=element.enabled,
+                submit_via="enter",
+                target_tag=element.tag,
+                target_role=element.role,
+                target_type=element.type_attr,
+                form_method=_form_method_value(element.form_method),
+                is_navigation=False,
+                search_field=True,
+            )
+        )
     return ActionSpace(
         candidates=tuple(candidates),
         truncated=len(candidates) >= limit,

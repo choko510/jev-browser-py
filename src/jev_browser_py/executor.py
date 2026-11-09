@@ -104,16 +104,25 @@ class SingleActionExecutor:
         self._options = options or ExecutorOptions()
         self._resolver = target_resolver
 
+    @property
+    def page(self) -> Any:
+        """The Playwright Page this executor can mutate."""
+        return self._page
+
     async def execute_one(
         self,
         *,
         proposal: ActionProposal,
         snapshot: PageSnapshot,
+        current_snapshot: PageSnapshot | None = None,
         typed_text: str | None = None,
         select_option_index: int | None = None,
     ) -> ActionOutcome:
         """Run a proposal, returning a classified outcome.
 
+        Element actions require a freshly observed `current_snapshot` and fail
+        closed if its stamped target fingerprint differs. Direct callers must
+        also coordinate the shared Page action lock; `runtime.run()` does both.
         Raises :class:`StaleTargetError` when the target no longer matches the
         snapshot; returns an `UNCERTAIN` outcome when an action that may have
         had an external effect failed ambiguously.
@@ -121,6 +130,16 @@ class SingleActionExecutor:
         from .judgment import assert_fresh
 
         assert_fresh(proposal, snapshot)
+        if proposal.candidate is not None:
+            if current_snapshot is None:
+                raise StaleTargetError("a freshly observed snapshot is required before execution")
+            live_matches = [
+                candidate
+                for candidate in current_snapshot.action_space.candidates
+                if candidate.stamp == proposal.candidate.stamp and candidate.kind is proposal.candidate.kind
+            ]
+            if len(live_matches) != 1 or live_matches[0].fingerprint != proposal.candidate.fingerprint:
+                raise StaleTargetError("the target fingerprint changed before dispatch")
         if proposal.control is ControlAction.DONE:
             return self._outcome(
                 proposal,
@@ -317,8 +336,7 @@ class SingleActionExecutor:
                 return ActionExecution(acted=False, detail="typing disabled", error="typing disabled")
             text = self._validated_text(typed_text)
             await self._page.fill(selector, text, timeout=timeout)
-            await self._page.press(selector, "Enter", timeout=timeout)
-            return ActionExecution(acted=True, detail=f"searched (text len {len(text)})", typed_text=text)
+            return ActionExecution(acted=True, detail=f"search text prepared (len {len(text)}); not submitted", typed_text=text)
         if candidate.kind is ActionKind.TYPE:
             if not options.allow_typing:
                 return ActionExecution(acted=False, detail="typing disabled", error="typing disabled")

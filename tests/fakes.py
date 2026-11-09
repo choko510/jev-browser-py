@@ -72,9 +72,11 @@ class FakeExecutor:
         *,
         proposal: ActionProposal,
         snapshot: PageSnapshot,
+        current_snapshot: PageSnapshot | None = None,
         typed_text: str | None = None,
         select_option_index: int | None = None,
     ) -> ActionOutcome:
+        del current_snapshot
         self.executed.append(proposal)
         self.typed_texts.append(typed_text)
         self.select_indices.append(select_option_index)

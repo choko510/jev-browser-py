@@ -59,7 +59,7 @@ jobs:
       - name: Install Chromium for Playwright
         run: python -m playwright install --with-deps chromium
       - name: Local fixture E2E
-        run: python -m pytest -q tests/test_e2e_local.py -m browser
+        run: python -m pytest -q -m browser
         env:
           PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
 

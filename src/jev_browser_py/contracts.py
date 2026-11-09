@@ -250,6 +250,12 @@ class ActionCandidate(StrictModel):
     options: tuple[str, ...] = ()
     option_indices: tuple[int, ...] = ()
     submit_via: Literal["click", "enter"] | None = None
+    target_tag: str = ""
+    target_role: str = ""
+    target_type: str = ""
+    form_method: Literal["get", "post"] | None = None
+    is_navigation: bool = False
+    search_field: bool = False
 
     @field_validator("description")
     @classmethod
