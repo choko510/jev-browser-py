@@ -322,7 +322,7 @@ class BrowserSession:
         try:
             await websocket_route("**/*", _websocket_handler)
             await context.route("**/*", _route_handler)
-        except Exception as error:  # noqa: BLE001 - failure to install is fail-closed
+        except Exception as error:
             raise NetworkGuardError("the browser network guard could not be installed") from error
 
     async def close(self) -> None:
