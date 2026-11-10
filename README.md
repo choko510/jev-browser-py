@@ -203,7 +203,8 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | GitHub Actions run `42648478807` on prior HEAD `04939bc` | jobs reported green, but browser logs showed 12 skipped and 219 deselected; not accepted as browser execution evidence |
 | First remediation CI `42677681232` (`aac681c`) | browser/package jobs passed; quality jobs failed only at Ruff formatting, fixed in `b4d9f5d` |
 | GitHub Actions rerun `42823111903` (`b4d9f5d`) | all jobs passed; each Chromium job reported 15 passed, 238 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` |
-| Latest GitHub Actions `42826391344` (`9afe9a7`) | all jobs passed after test-module split; both Chromium jobs reported 15 passed, 238 deselected |
+| Code/test CI `42826391344` (`9afe9a7`) | all jobs passed after test-module split; both Chromium jobs reported 15 passed, 238 deselected |
+| Documentation follow-up CI `42827933717` (`9de03bb`) | all quality, required Chromium, package-build, and wheel-import jobs passed |
 | `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
