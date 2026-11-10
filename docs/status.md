@@ -110,7 +110,11 @@ public site is used.
 | No unmeasured performance claim | README + benchmark `not measured` field |
 
 **Remaining release gaps:** the upstream TypeScript comparison and paid live
-smoke are unmeasured here. Code/test CI `42826391344` and documentation CI `42827933717` both passed all jobs. Cost control fails closed on unknown estimates but is not a
+smoke are unmeasured here. Follow-up audit CI run `42847672732` on `e0ca163`
+passed every job, with both required Chromium jobs reporting 18 passed and no
+skips; run `42847147775` on `41e1898` had passed Chromium and package jobs but
+failed only the Ruff format check, which `e0ca163` fixed. Cost control fails
+closed on unknown estimates but is not a
 provider-enforced invoice cap. The Python network guard remains best-effort and
 is not an egress firewall; use verified external isolation before untrusted
 public access. PR #1 remains Draft; these are explicit gaps, not a v1.0

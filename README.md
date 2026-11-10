@@ -214,7 +214,9 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | GitHub Actions rerun `42823111903` (`b4d9f5d`) | all jobs passed; each Chromium job reported 15 passed, 238 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` |
 | Code/test CI `42826391344` (`9afe9a7`) | all jobs passed after test-module split; both Chromium jobs reported 15 passed, 238 deselected |
 | Documentation follow-up CI `42827933717` (`9de03bb`) | all quality, required Chromium, package-build, and wheel-import jobs passed |
-| Follow-up audit fixes (local, pre-push) | 266 passed; offline 248; required Chromium 18 passed with no skips; Ruff, format (40 files), mypy, build, import smoke all pass |
+| Follow-up audit fixes (local) | 266 passed; offline 248; required Chromium 18 passed with no skips; Ruff, format (40 files), mypy, build, import smoke all pass |
+| GitHub Actions run `42847147775` (`41e1898`) | Chromium and package jobs passed; both quality jobs failed only at Ruff format (one blank line in `runtime.py`), fixed in `e0ca163` |
+| GitHub Actions run `42847672732` (`e0ca163`) | all jobs passed; both required Chromium jobs reported 18 passed, 248 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` and no skips; offline jobs reported 248 passed, 12 deselected |
 | `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
