@@ -224,6 +224,7 @@ def _record_abandoned_operation(page: Any | None, operation: asyncio.Future[Any]
 
     _record_abandoned_page_operation(page, operation)
 
+
 def _consume_cancelled_task(task: asyncio.Future[Any]) -> None:
     if task.cancelled():
         return
