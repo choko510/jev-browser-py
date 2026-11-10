@@ -38,8 +38,7 @@ python examples/local_task.py                           -> status success, verif
 prior HEAD `04939bc`, but its browser job logged 12 skipped and 219 deselected.
 That run is not evidence that browser tests executed. The workflow now uses the
 same absolute browser path for installation and testing, disables skip marks in
-required mode, and fails if no browser test passes. A fresh CI run for this
-worktree is pending push.
+required mode, and fails if no browser test passes. Run `42823111903` on `b4d9f5d` passed all jobs; both browser jobs logged 15 passed and 238 deselected.
 
 Browser tests (real Chromium, loopback fixtures, scripted judgment): 15 passed
 locally with required mode enabled. They include the verified search path, a
@@ -69,7 +68,7 @@ is used.
 | PYJEV-T05 | `test_runtime.py` (double match, stale fingerprint, stale snapshot) |
 | PYJEV-T06 | `test_runtime.py`, `test_verifier.py` (done alone never succeeds) |
 | PYJEV-T07 | `test_runtime.py` (full-confidence submit denied, zero actions) |
-| PYJEV-T08 | `test_runtime.py` (global awaited-stage deadlines, cancel, stuck) |
+| PYJEV-T08 | `test_runtime.py`, `test_provider_budgets.py` (global awaited-stage deadlines, cancel, stuck) |
 | PYJEV-T09 | `test_runtime.py`, `test_security.py` (terminal error, no retry) |
 | PYJEV-T10 | `test_redaction.py`, `test_redaction_wiring.py`, `test_security.py` (unknown URL tokens at model boundaries) |
 | PYJEV-T11 | `test_extraction.py` (socket-failing extraction, provenance) |
@@ -90,7 +89,7 @@ is used.
 | Unknown buttons and unapproved HTTP writes fail closed | `judgment.py`, `policy.py`, `session.py`, `test_policy_and_typing.py`, `test_e2e_local.py` |
 | Independent verifier prevents false success | `test_verifier.py` + E2E |
 | Unknown URL query/fragment/userinfo and opaque tokens are masked before provider inputs | `test_redaction.py`, `test_redaction_wiring.py` (URL heuristic is not a complete PII detector) |
-| Global deadlines, estimator fail-closed, cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_security.py` |
+| Global deadlines, estimator fail-closed, cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_provider_budgets.py`, `test_security.py` |
 | Loopback default-deny, action-scoped unsafe methods, redirect and subresource policy | `test_security.py`, `test_scope.py` (application guard only; not an egress firewall) |
 | Single-fetch Scrapling extraction with evidence | `test_extraction.py` |
 | Scope limits and cost-estimator billing caveat documented | `docs/limits.md` |
@@ -98,8 +97,7 @@ is used.
 | No unmeasured performance claim | README + benchmark `not measured` field |
 
 **Remaining release gaps:** the upstream TypeScript comparison and paid live
-smoke are unmeasured here; a fresh GitHub Actions run for this remediation is
-pending push. Cost control fails closed on unknown estimates but is not a
+smoke are unmeasured here. GitHub Actions run `42823111903` on `b4d9f5d` passed all jobs. Cost control fails closed on unknown estimates but is not a
 provider-enforced invoice cap. The Python network guard remains best-effort and
 is not an egress firewall; use verified external isolation before untrusted
 public access. PR #1 remains Draft; these are explicit gaps, not a v1.0
