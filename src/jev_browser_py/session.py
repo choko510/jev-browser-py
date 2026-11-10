@@ -75,6 +75,7 @@ class NetworkPolicy:
     block_downloads: bool = True
     block_new_tabs: bool = False
     _unsafe_pages: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _authorized_writes: int = field(default=0, init=False, repr=False, compare=False)
     _unsafe_pages_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -115,21 +116,36 @@ class NetworkPolicy:
 
     @contextlib.contextmanager
     def authorize_unsafe_requests(self, page: Any) -> Iterator[None]:
-        """Scope unsafe HTTP methods to one caller-approved Page action."""
+        """Scope mutating traffic to one caller-approved Page action.
+
+        The scope covers unsafe HTTP methods for that Page and page->server
+        WebSocket messages for the policy's whole Context, because Playwright
+        exposes no Page on a WebSocket route. A Context now carries exactly one
+        policy, so this counter cannot leak across policies.
+        """
         if not self.allow_unsafe_methods:
             raise NetworkGuardError("unsafe HTTP methods are disabled by the network policy")
         key = id(page)
         with self._unsafe_pages_lock:
             self._unsafe_pages[key] = self._unsafe_pages.get(key, 0) + 1
+            self._authorized_writes += 1
         try:
             yield
         finally:
             with self._unsafe_pages_lock:
+                self._authorized_writes = max(0, self._authorized_writes - 1)
                 remaining = self._unsafe_pages.get(key, 0) - 1
                 if remaining > 0:
                     self._unsafe_pages[key] = remaining
                 else:
                     self._unsafe_pages.pop(key, None)
+
+    def websocket_send_allowed(self) -> bool:
+        """True only while an explicitly authorized write action is active."""
+        if not self.allow_unsafe_methods:
+            return False
+        with self._unsafe_pages_lock:
+            return self._authorized_writes > 0
 
     def request_method_allowed(self, method: str, page: Any | None) -> bool:
         if method.upper() in _SAFE_HTTP_METHODS:
@@ -238,6 +254,8 @@ async def _safe_abort(route: Any) -> None:
 
 _PAGE_LOCKS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Lock]] = {}
 _PAGE_NETWORK_POLICIES: dict[int, tuple[weakref.ReferenceType[Any], NetworkPolicy]] = {}
+_CONTEXT_NETWORK_POLICIES: dict[int, tuple[weakref.ReferenceType[Any], NetworkPolicy]] = {}
+_PAGE_ABANDONED_OPS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Future[Any]]] = {}
 _PAGE_LOCKS_GUARD = threading.RLock()
 
 
@@ -274,6 +292,71 @@ def _network_policy_for_page(page: Any) -> NetworkPolicy | None:
         if current is not None and current[0]() is page:
             return current[1]
     return None
+
+
+def _forget_context_network_policy(key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_NETWORK_POLICIES.get(key)
+        if current is not None and current[0] is reference:
+            del _CONTEXT_NETWORK_POLICIES[key]
+
+
+def _register_context_network_policy(context: Any, policy: NetworkPolicy) -> bool:
+    """Bind one policy to a Context; a Context never enforces two policies.
+
+    Returns True when this call created the binding, so a failed route
+    installation can release exactly its own claim.
+    """
+    key = id(context)
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_NETWORK_POLICIES.get(key)
+        if current is not None and current[0]() is context:
+            if current[1] is not policy:
+                raise NetworkGuardError("this browser Context already enforces a different network policy")
+            return False
+        reference = weakref.ref(context, lambda ref: _forget_context_network_policy(key, ref))
+        _CONTEXT_NETWORK_POLICIES[key] = (reference, policy)
+        return True
+
+
+def _release_context_network_policy(context: Any, policy: NetworkPolicy) -> None:
+    key = id(context)
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_NETWORK_POLICIES.get(key)
+        if current is not None and current[0]() is context and current[1] is policy:
+            del _CONTEXT_NETWORK_POLICIES[key]
+
+
+def _record_abandoned_page_operation(page: Any, operation: asyncio.Future[Any]) -> None:
+    """Record a cancelled page operation that has not stopped yet."""
+    key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_ABANDONED_OPS.get(key)
+        if current is not None and current[0]() is page and not current[1].done():
+            return
+        reference = weakref.ref(page, lambda ref: _forget_abandoned_operation(key, ref))
+        _PAGE_ABANDONED_OPS[key] = (reference, operation)
+
+
+def _forget_abandoned_operation(key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_ABANDONED_OPS.get(key)
+        if current is not None and current[0] is reference:
+            del _PAGE_ABANDONED_OPS[key]
+
+
+def _pending_page_operation(page: Any) -> asyncio.Future[Any] | None:
+    """The still-running operation that was abandoned on this Page, if any."""
+    key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _PAGE_ABANDONED_OPS.get(key)
+        if current is None or current[0]() is not page:
+            return None
+        operation = current[1]
+        if operation.done():
+            del _PAGE_ABANDONED_OPS[key]
+            return None
+        return operation
 
 
 @contextlib.contextmanager
@@ -328,6 +411,8 @@ class BrowserSession:
 
     async def navigate(self, url: str, *, timeout_ms: int = 15_000) -> None:
         """Navigate under the network policy, never bypassing it."""
+        if _pending_page_operation(self.page) is not None:
+            raise NetworkGuardError("a cancelled page operation is still running; this Page will not be reused")
         self.network.check(url)
         try:
             await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -337,16 +422,24 @@ class BrowserSession:
             raise NetworkGuardError("navigation failed before the page could be trusted") from error
 
     async def install_guard(self) -> None:
-        """Install awaited context-wide HTTP and WebSocket policy routes.
+        """Install awaited Context-wide HTTP and WebSocket policy routes.
+
+        One Context enforces exactly one `NetworkPolicy`: the first session
+        installs it and any later session wrapping another Page in that same
+        Context must pass the identical policy object. Otherwise the later
+        route would silently govern the earlier Page's traffic.
 
         The guard is installed before any owned-page navigation and applies to
         every observed HTTP resource type and popup in the Context. Unsafe HTTP
         methods require both `allow_unsafe_methods=True` and an active authorized
-        write action for the request's Page. Redirect responses are blocked because
-        Playwright does not re-run the route handler for
-        every server redirect hop. Playwright also has no API to remove
-        WebSocket routes; on an injected Context this policy remains attached
-        until the caller closes that Context. This is not an egress firewall.
+        write action for the request's Page. Page-to-server WebSocket messages
+        are dropped by default; they are forwarded only while such an authorized
+        write action is active, because a WebSocket route exposes no Page.
+        Redirect responses are blocked because Playwright does not re-run the
+        route handler for every server redirect hop. Playwright also has no API
+        to remove WebSocket routes; on an injected Context this policy remains
+        attached until the caller closes that Context. This is not an egress
+        firewall.
         """
         context = self.owner.context
         if context is None or self.page is None:
@@ -355,6 +448,10 @@ class BrowserSession:
         if websocket_route is None:
             raise NetworkGuardError("this Playwright Context cannot enforce WebSocket policy")
         policy = self.network
+        # Claim the Context before installing any route: a second session with a
+        # different policy must fail here, not silently replace the handler that
+        # already governs the first Page's traffic.
+        claimed = _register_context_network_policy(context, policy)
 
         async def _route_handler(route: Any) -> None:
             try:
@@ -404,7 +501,15 @@ class BrowserSession:
             if not allowed:
                 await route.close(code=1008, reason="blocked by the session network policy")
                 return
-            await route.connect()
+            server_route = route.connect_to_server()
+
+            def _forward(message: str | bytes) -> None:
+                # Default deny: a read-only action never authorizes a client
+                # message, and Playwright cannot attribute the socket to a Page.
+                if policy.websocket_send_allowed():
+                    server_route.send(message)
+
+            route.on_message(_forward)
 
         try:
             existing_policy = _network_policy_for_page(self.page)
@@ -414,6 +519,8 @@ class BrowserSession:
             await context.route("**/*", _route_handler)
             _register_page_network_policy(self.page, policy)
         except Exception as error:
+            if claimed:
+                _release_context_network_policy(context, policy)
             raise NetworkGuardError("the browser network guard could not be installed") from error
 
     async def close(self) -> None:

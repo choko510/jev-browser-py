@@ -146,11 +146,14 @@ does not enable localhost.
   them and an approved write/ambiguous action is currently executing. The CLI's
   `--allow-external-write` enables both policy gates; API callers must configure both.
 - `run()` serializes a Page through a shared per-Page lock and refuses a real Playwright
-  Page without a registered `open_session` network guard. Freshness is checked against the
-  exact proposal snapshot and a fresh live fingerprint immediately before dispatch. Direct
-  `SingleActionExecutor.execute_one()` callers must install/use a guarded session, supply
-  `current_snapshot`, coordinate that same Page lock, and explicitly scope any unsafe
-  requests themselves.
+  Page without a registered `open_session` network guard. The lock wait counts against
+  `max_seconds`; a run that cannot get the Page in time is `TIMEOUT` and touches nothing.
+  If a cancelled page operation does not stop within its settle window, later runs wait for it
+  and then report `BLOCKED`/`UNKNOWN_EFFECT` instead of acting on a Page that may still be in use.
+  Freshness is checked against the exact proposal snapshot and a fresh live fingerprint
+  immediately before dispatch. Direct `SingleActionExecutor.execute_one()` callers must
+  install/use a guarded session, supply `current_snapshot`, coordinate that same Page lock,
+  and explicitly scope any unsafe requests themselves.
 - A click or submit that fails *after* it may have reached the server becomes `UNCERTAIN`
   and the run stops without retrying (`RunStatus.UNKNOWN_EFFECT`).
 - Password fields are never offered unless a credential source is active; sensitive field
@@ -158,7 +161,9 @@ does not enable localhost.
 - Configured secrets are redacted in every representation (raw, HTML-escaped, URL-encoded,
   JSON-escaped) before page text reaches the model or a trace. Model-facing URLs also remove
   userinfo, fragments, all query values (including unknown keys), and long opaque path tokens.
-  Redaction failure stops the run.
+  Redaction failure stops the run. Link dedupe uses a private digest of the raw destination,
+  not the masked href, so two links whose masked URLs look identical stay two actions while
+  neither raw value reaches the model.
 - Every provider must declare a per-call maximum with `CostEstimator.estimate_max_cost_usd`;
   missing, invalid, or over-budget estimates block the call before dispatch. `RunResult` reports
   the reserved `estimated_cost_usd`. The OpenAI-compatible typing provider needs an explicit
@@ -169,15 +174,19 @@ does not enable localhost.
 
 - **The Python network guard is best-effort.** Context routing filters observed HTTP and
   WebSocket traffic and blocks redirects, but browser preconnects or platform-level traffic
-  may bypass it. `NetworkPolicy` is not an egress firewall. Injected contexts may already
-  have service workers; their context-level WebSocket route remains until that Context is
-  closed. Use a dedicated Context and real isolation (container, proxy, or host firewall)
-  for untrusted goals.
+  may bypass it. `NetworkPolicy` is not an egress firewall. A Context enforces exactly one
+  policy: the first session installs it and any other session on that Context must pass the
+  same policy object or fail to install. Page-to-server WebSocket messages are dropped unless
+  an authorized write action is active, because Playwright exposes no Page on a socket route.
+  Injected contexts may already have service workers; their context-level WebSocket route
+  remains until that Context is closed. Use a dedicated Context and real isolation (container,
+  proxy, or host firewall) for untrusted goals.
 - The local cost ceiling is only as reliable as each provider's declared upper-bound estimator
   and reported usage. It is not a provider-enforced financial cap: billing, hidden provider
   overhead, or already-accepted remote work can differ. Configure provider-side spending limits
-  for a hard invoice cap. `max_seconds` bounds the run's awaited work and passes the remaining
-  deadline to the typing HTTP request, but it cannot recall work already accepted remotely.
+  for a hard invoice cap. `max_seconds` bounds the run's awaited work, including the Page lock
+  wait, and passes the remaining deadline to the typing HTTP request, but it cannot recall work
+  already accepted remotely.
 - `RuleBasedVerifier` verifies explicit goal phrases only. Goals without an extractable
   evidence target remain `UNVERIFIED`; use a task-specific `CallableVerifier` for
   destination or state checks.
@@ -192,11 +201,11 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q` (all) | 253 passed |
-| `python -m pytest -q -m "not browser"` (offline) | 238 passed, 15 deselected |
-| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 15 passed, 238 deselected; no browser skips |
+| `python -m pytest -q` (all) | 266 passed |
+| `python -m pytest -q -m "not browser"` (offline) | 248 passed, 18 deselected |
+| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 18 passed, 248 deselected; no browser skips |
 | `python -m ruff check --no-cache .` | all checks passed |
-| `python -m ruff format --check .` | 38 files already formatted |
+| `python -m ruff format --check .` | 40 files already formatted |
 | `python -m mypy src/jev_browser_py` | no issues (17 files) |
 | `python -m build` | sdist + wheel built from the remediation worktree |
 | `python examples/local_task.py` | `success`, `verified: True` (3 actions) |
@@ -205,6 +214,7 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | GitHub Actions rerun `42823111903` (`b4d9f5d`) | all jobs passed; each Chromium job reported 15 passed, 238 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` |
 | Code/test CI `42826391344` (`9afe9a7`) | all jobs passed after test-module split; both Chromium jobs reported 15 passed, 238 deselected |
 | Documentation follow-up CI `42827933717` (`9de03bb`) | all quality, required Chromium, package-build, and wheel-import jobs passed |
+| Follow-up audit fixes (local, pre-push) | 266 passed; offline 248; required Chromium 18 passed with no skips; Ruff, format (40 files), mypy, build, import smoke all pass |
 | `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and

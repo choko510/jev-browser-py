@@ -77,6 +77,8 @@ DONE_THRESHOLD = MOCK_DONE_THRESHOLD
 STUCK_THRESHOLD = MOCK_DONE_THRESHOLD
 STUCK_MIN_STEP = 3
 HISTORY_LIMIT = 8
+DEADLINE_SETTLE_SECONDS = 5.0
+"""How long a cancelled operation may take to stop before its Page is held."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +176,21 @@ class _CostBudget:
         return estimate
 
 
-async def _await_before_deadline[T](awaitable: Awaitable[T], deadline: float) -> T:
-    """Return by the run deadline even when a provider ignores its deadline argument."""
+async def _await_before_deadline[T](
+    awaitable: Awaitable[T],
+    deadline: float,
+    *,
+    page: Any | None = None,
+    settle_seconds: float | None = None,
+) -> T:
+    """Return by the run deadline even when a provider ignores its deadline argument.
+
+    A timed-out operation is cancelled and then awaited for a bounded settle
+    window. When it touches a Page and does not stop inside that window, the
+    Page is held so no later run can act on it while the abandoned operation
+    may still be in flight.
+    """
+    settle = DEADLINE_SETTLE_SECONDS if settle_seconds is None else settle_seconds
     remaining = deadline - _clock()
     if remaining <= 0:
         close = getattr(awaitable, "close", None)
@@ -183,13 +198,31 @@ async def _await_before_deadline[T](awaitable: Awaitable[T], deadline: float) ->
             close()
         raise TimeoutError("run deadline expired")
     task = asyncio.ensure_future(awaitable)
-    completed, _ = await asyncio.wait((task,), timeout=remaining)
+    try:
+        completed, _ = await asyncio.wait((task,), timeout=remaining)
+    except asyncio.CancelledError:
+        task.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.wait((task,), timeout=settle)
+        raise
     if task not in completed:
         task.cancel()
-        task.add_done_callback(_consume_cancelled_task)
+        settled, _ = await asyncio.wait((task,), timeout=settle)
+        if task in settled:
+            _consume_cancelled_task(task)
+        else:
+            _record_abandoned_operation(page, task)
+            task.add_done_callback(_consume_cancelled_task)
         raise TimeoutError("run deadline expired")
     return task.result()
 
+
+def _record_abandoned_operation(page: Any | None, operation: asyncio.Future[Any]) -> None:
+    if page is None:
+        return
+    from .session import _record_abandoned_page_operation
+
+    _record_abandoned_page_operation(page, operation)
 
 def _consume_cancelled_task(task: asyncio.Future[Any]) -> None:
     if task.cancelled():
@@ -276,6 +309,11 @@ async def run(
     if snapshot_page is not None and executor_page is not None and snapshot_page is not executor_page:
         raise ValueError("snapshotter and executor must target the same Page")
     page = snapshot_page if snapshot_page is not None else executor_page
+    resolved_limits = limits or RunLimits()
+    # The lock wait is part of the run's wall clock: a queued run must not get
+    # a fresh `max_seconds` after it finally reaches the Page.
+    started = _clock()
+    deadline = started + resolved_limits.max_seconds
     if page is None:
         return await _run_unlocked(
             goal,
@@ -284,15 +322,42 @@ async def run(
             executor=executor,
             policy=policy,
             verifier=verifier,
-            limits=limits,
+            limits=resolved_limits,
             options=options,
             text_generator=text_generator,
             secrets=secrets,
             cancel_token=cancel_token,
+            started=started,
+            deadline=deadline,
         )
-    from .session import _page_action_lock
+    from .session import _page_action_lock, _pending_page_operation
 
-    async with _page_action_lock(page):
+    lock = _page_action_lock(page)
+    acquired = False
+    try:
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - _clock()))
+        except TimeoutError:
+            return RunResult(
+                status=RunStatus.TIMEOUT,
+                reason="the run deadline expired while waiting for the Page action lock",
+                elapsed_seconds=max(0.0, _clock() - started),
+                error_code=ErrorCode.TIMEOUT,
+            )
+        acquired = True
+        pending = _pending_page_operation(page)
+        if pending is not None:
+            # An earlier operation was abandoned on this Page. Do not observe or
+            # act until it has actually stopped; the remaining run deadline
+            # bounds that wait.
+            settled, _ = await asyncio.wait((pending,), timeout=max(0.0, deadline - _clock()))
+            if pending not in settled:
+                return RunResult(
+                    status=RunStatus.BLOCKED,
+                    reason="a cancelled page operation is still running; this Page will not be reused",
+                    elapsed_seconds=max(0.0, _clock() - started),
+                    error_code=ErrorCode.UNKNOWN_EFFECT,
+                )
         return await _run_unlocked(
             goal,
             transport=transport,
@@ -300,12 +365,17 @@ async def run(
             executor=executor,
             policy=policy,
             verifier=verifier,
-            limits=limits,
+            limits=resolved_limits,
             options=options,
             text_generator=text_generator,
             secrets=secrets,
             cancel_token=cancel_token,
+            started=started,
+            deadline=deadline,
         )
+    finally:
+        if acquired:
+            lock.release()
 
 
 async def _run_unlocked(
@@ -321,8 +391,10 @@ async def _run_unlocked(
     text_generator: TextGenerator | None = None,
     secrets: Sequence[str] = (),
     cancel_token: CancelToken | None = None,
+    started: float,
+    deadline: float,
 ) -> RunResult:
-    """Execute one goal; the public wrapper owns the Page action lock."""
+    """Execute one goal; the public wrapper owns the Page action lock and clock."""
     resolved_limits = limits or RunLimits()
     resolved_options = options or RunOptions()
     configured_secrets = list(dict.fromkeys(secrets))
@@ -348,8 +420,6 @@ async def _run_unlocked(
         cancel_token=cancel_token,
         goal_revision=0,
     )
-    started = _clock()
-    deadline = started + resolved_limits.max_seconds
     usage = Usage()
     jev_calls = 0
     actions_taken = 0
@@ -440,7 +510,7 @@ async def _run_unlocked(
 
         # ── Observe ─────────────────────────────────────────────────────────
         try:
-            snapshot = await _await_before_deadline(snapshotter.observe(), deadline)
+            snapshot = await _await_before_deadline(snapshotter.observe(), deadline, page=page)
         except TimeoutError:
             return _result(
                 RunStatus.TIMEOUT,
@@ -679,7 +749,7 @@ async def _run_unlocked(
         live_snapshot = snapshot
         if proposal.candidate is not None:
             try:
-                live_snapshot = await _await_before_deadline(snapshotter.observe(), deadline)
+                live_snapshot = await _await_before_deadline(snapshotter.observe(), deadline, page=page)
             except TimeoutError:
                 return _result(
                     RunStatus.TIMEOUT,
@@ -731,6 +801,7 @@ async def _run_unlocked(
                         select_option_index=select_index,
                     ),
                     deadline,
+                    page=page,
                 )
         except TimeoutError:
             if proposal.side_effect in {SideEffectClass.EXTERNAL_WRITE, SideEffectClass.AMBIGUOUS}:
@@ -795,7 +866,7 @@ async def _run_unlocked(
 
         # ── Re-observe, then let the verifier have the last word ────────────
         try:
-            after = await _await_before_deadline(snapshotter.observe(bump=True), deadline)
+            after = await _await_before_deadline(snapshotter.observe(bump=True), deadline, page=page)
         except TimeoutError:
             return _result(
                 RunStatus.UNKNOWN_EFFECT,

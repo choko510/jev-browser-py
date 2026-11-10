@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .action_space import MAX_RAW_ELEMENTS, RawElement, build_action_space, raw_from_mapping
+from .action_space import MAX_RAW_ELEMENTS, RawElement, build_action_space, raw_from_mapping, raw_href_identity
 from .contracts import PageSnapshot, RedactionStatus, SnapshotTooLargeError
 from .redaction import RedactionFailure, Redactor, build_redactor, redact_url_for_model, redact_urls_in_text
 
@@ -341,11 +341,20 @@ class Snapshotter:
         return len(str(content).encode("utf-8", errors="replace"))
 
     def _redact_element(self, element: RawElement) -> RawElement:
+        """Mask model-facing text while keeping a private raw-href identity.
+
+        Dedupe must not run on the masked href: redaction collapses query
+        values, fragments, and opaque tokens, so distinct links can mask to the
+        same string. `href_identity` is a digest of the raw href and never
+        appears in `description`.
+        """
+        identity = element.href_identity or raw_href_identity(element.href)
         if not self._redactor.has_secrets():
             return replace(
                 element,
                 text=redact_urls_in_text(element.text)[: self._options.label_cap],
                 href=redact_url_for_model(element.href),
+                href_identity=identity,
             )
         return RawElement(
             attr=element.attr,
@@ -365,6 +374,7 @@ class Snapshotter:
             options=tuple((index, self._redact(label)[:200]) for index, label in element.options),
             state=element.state,
             enabled=element.enabled,
+            href_identity=identity,
         )
 
     def _redact(self, text: str) -> str:

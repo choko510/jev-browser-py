@@ -45,25 +45,37 @@ than pretending to succeed.
 - A real Playwright `Page` passed to `run()` must have a `BrowserSession` network guard
   registered by `open_session`; otherwise the run is blocked. Direct low-level executor calls
   remain caller-owned and do not receive the runtime's automatic action-scoped write grant.
+- **One policy per Context.** The first `install_guard()` on a Context binds its policy; any
+  other session on that Context must pass the identical policy object, or installation fails
+  with `NetworkGuardError`. A failed installation releases its claim, so a later attempt can
+  still succeed. This prevents a second Page's session from silently re-governing the first.
 - The **network policy** routes observed HTTP resources and WebSocket endpoints
   through the Context allow-list; redirect responses are blocked. On an injected
   page, its WebSocket route remains until the caller closes that Context. Unsafe
   methods (all methods other than GET/HEAD/OPTIONS) are denied unless
   `allow_unsafe_methods=True` and an authorized external-write/ambiguous action
-  is active for that same Page. The CLI `--allow-external-write` enables both
-  the ActionPolicy and network gates. The guard is *not* an egress firewall:
-  preconnects, existing service workers, DNS rebinding, and platform-level
-  traffic may bypass the Python layer. Use a dedicated Context and real
-  isolation for untrusted goals.
+  is active for that same Page. Page-to-server WebSocket messages are dropped by
+  default and forwarded only inside that same authorized write scope; a socket
+  route exposes no Page, so a read-only action can never authorize a message.
+  The CLI `--allow-external-write` enables both the ActionPolicy and network gates.
+  The guard is *not* an egress firewall: preconnects, existing service workers, DNS
+  rebinding, and platform-level traffic may bypass the Python layer. Use a dedicated
+  Context and real isolation for untrusted goals.
 - **Model URL redaction** removes URL userinfo, fragments, every query value
   (not only recognized secret keys), and long opaque path segments. This is a
   conservative token heuristic, not a complete PII detector; configured-secret
-  redaction remains an additional pass.
-- **Time budget:** `max_seconds` is one monotonic run deadline applied to page
-  observation, providers/generators, policy, executor, and verifier awaits. A
-  timeout stops the run and prevents success. It cannot recall a request already
-  accepted by a remote provider; the OpenAI-compatible typing request receives
-  the remaining timeout, while a cancelled worker may take time to terminate.
+  redaction remains an additional pass. Action-space dedupe compares a private
+  SHA-256 of the raw destination, never the masked href, so two distinct links
+  cannot collapse into one action just because redaction made them look equal.
+- **Time budget:** `max_seconds` is one monotonic run deadline applied to the
+  Page action-lock wait, page observation, providers/generators, policy, executor,
+  and verifier awaits. A timeout stops the run and prevents success. A cancelled
+  page operation is awaited for a bounded settle window; if it still has not
+  stopped, later runs wait for it and then report `BLOCKED` with
+  `UNKNOWN_EFFECT` rather than acting on a Page that may still be in use. The
+  deadline cannot recall a request already accepted by a remote provider; the
+  OpenAI-compatible typing request receives the remaining timeout, while a
+  cancelled worker may take time to terminate.
 - **Cost budget:** each Jev transport and text generator must implement
   `CostEstimator.estimate_max_cost_usd`; missing/invalid/over-budget estimates
   stop before dispatch. TypeSafe reserves a UTF-8 byte bound plus 65,536 bytes

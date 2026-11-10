@@ -24,11 +24,11 @@ Environment: Windows 11, Python 3.14.3, Playwright 1.64.1 (bundled Chromium),
 Scrapling 0.5.1, TypeSafe SDK 0.7.5.
 
 ```
-python -m pytest -q                                      -> 253 passed
-python -m pytest -q -m "not browser"                     -> 238 passed, 15 deselected
-JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 15 passed, 238 deselected; no skips
+python -m pytest -q                                      -> 266 passed
+python -m pytest -q -m "not browser"                     -> 248 passed, 18 deselected
+JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 18 passed, 248 deselected; no skips
 python -m ruff check --no-cache .                       -> All checks passed
-python -m ruff format --check .                          -> 38 files already formatted
+python -m ruff format --check .                          -> 40 files already formatted
 python -m mypy src/jev_browser_py                       -> Success: no issues found (17 files)
 python -m build                                          -> sdist + wheel built from this worktree
 python examples/local_task.py                           -> status success, verified True (3 actions)
@@ -40,11 +40,22 @@ That run is not evidence that browser tests executed. The workflow now uses the
 same absolute browser path for installation and testing, disables skip marks in
 required mode, and fails if no browser test passes. Code/test run `42826391344` on `9afe9a7` passed every job after extracting provider-budget regressions to `test_provider_budgets.py`. Documentation follow-up run `42827933717` on `9de03bb` also passed quality, both required-browser jobs, package build, and wheel import; each browser log reported 15 passed and 238 deselected.
 
-Browser tests (real Chromium, loopback fixtures, scripted judgment): 15 passed
+Browser tests (real Chromium, loopback fixtures, scripted judgment): 18 passed
 locally with required mode enabled. They include the verified search path, a
 same-origin JavaScript POST blocked for a read link, an explicitly authorized
-POST form, redirects/subresources, and local page-scope behavior; no public site
-is used.
+POST form, redirects/subresources, local page-scope behavior, a shared Context
+rejecting a second network policy, the same policy accepted for two Pages, and
+two links whose query values mask identically staying two distinct actions; no
+public site is used.
+
+**Follow-up audit remediation (same Draft PR):**
+
+| Finding | Owner | Regression |
+|---|---|---|
+| Shared Context could apply a later route's policy to all Pages | `session.py` `_register_context_network_policy` | `test_audit_followups.py`, `test_e2e_audit_followups.py` |
+| WebSocket client messages were forwarded unconditionally | `session.py` `_websocket_handler` | `test_audit_followups.py` (default deny, authorized send, disabled policy) |
+| Masked URLs could collapse distinct links | `action_space.py` `raw_href_identity`, `snapshot.py` | `test_audit_followups.py`, `test_e2e_audit_followups.py` |
+| Page-lock wait was outside `max_seconds`; a timed-out operation could overlap a later Run | `runtime.py` `_await_before_deadline`, `run()` | `test_audit_followups.py` (lock-wait timeout, abandoned-operation block) |
 
 ## Not executed here
 
@@ -89,8 +100,10 @@ is used.
 | Unknown buttons and unapproved HTTP writes fail closed | `judgment.py`, `policy.py`, `session.py`, `test_policy_and_typing.py`, `test_e2e_local.py` |
 | Independent verifier prevents false success | `test_verifier.py` + E2E |
 | Unknown URL query/fragment/userinfo and opaque tokens are masked before provider inputs | `test_redaction.py`, `test_redaction_wiring.py` (URL heuristic is not a complete PII detector) |
-| Global deadlines, estimator fail-closed, cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_provider_budgets.py`, `test_security.py` |
-| Loopback default-deny, action-scoped unsafe methods, redirect and subresource policy | `test_security.py`, `test_scope.py` (application guard only; not an egress firewall) |
+| Global deadlines, estimator fail-closed, cancel/timeout/unknown-effect safety | `test_runtime.py`, `test_provider_budgets.py`, `test_security.py`, `test_audit_followups.py` |
+| Loopback default-deny, action-scoped unsafe methods, redirect and subresource policy | `test_security.py`, `test_scope.py`, `test_audit_followups.py` (application guard only; not an egress firewall) |
+| One network policy per Context; WebSocket messages default-deny | `session.py`, `test_audit_followups.py`, `test_e2e_audit_followups.py` |
+| Link dedupe on raw URL identity, masked URLs only to the model | `action_space.py`, `snapshot.py`, `test_audit_followups.py`, `test_e2e_audit_followups.py` |
 | Single-fetch Scrapling extraction with evidence | `test_extraction.py` |
 | Scope limits and cost-estimator billing caveat documented | `docs/limits.md` |
 | Reproducible benchmark recorded | `.artifacts/benchmark.json` (scripted local fixture only) |

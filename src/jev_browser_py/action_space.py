@@ -29,6 +29,7 @@ __all__ = [
     "is_noise_href",
     "is_noise_name",
     "raw_from_mapping",
+    "raw_href_identity",
 ]
 
 MAX_RAW_ELEMENTS = 2000
@@ -119,12 +120,16 @@ class RawElement:
     options: tuple[tuple[int, str], ...] = ()
     state: tuple[str, ...] = ()
     enabled: bool = True
+    href_identity: str = ""
+    """Private digest of the raw href; identity only, never model-facing text."""
 
     def fingerprint(self) -> str:
         """Stable digest of the properties that make this target unique.
 
         Deliberately excludes `attr`, which is regenerated on every snapshot,
         and excludes any field value so secrets never enter a digest input.
+        `href_identity` is a hash of the raw href, so two links that redact to
+        the same masked URL stay distinguishable without exposing either.
         """
         payload = "\x1f".join(
             [
@@ -132,6 +137,7 @@ class RawElement:
                 self.role,
                 self.text,
                 self.href,
+                self.href_identity,
                 self.type_attr,
                 self.form_method,
                 "1" if self.clickable else "0",
@@ -145,6 +151,22 @@ class RawElement:
             ]
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def raw_href_identity(href: str) -> str:
+    """Private digest of a raw href, used only for destination dedupe.
+
+    Redaction deliberately collapses every query value, fragment, and opaque
+    path token. Two genuinely different links can therefore mask to the same
+    string; comparing the masked form would drop one of them. The digest is
+    never placed in model-facing text or in a `description`. The fragment is
+    dropped first, preserving the upstream rule that a link and its anchor are
+    one destination.
+    """
+    if not href:
+        return ""
+    destination = href.split("#", 1)[0]
+    return hashlib.sha256(destination.encode("utf-8")).hexdigest()
 
 
 def raw_from_mapping(payload: Mapping[str, Any]) -> RawElement:
@@ -184,6 +206,7 @@ def raw_from_mapping(payload: Mapping[str, Any]) -> RawElement:
         options=tuple(options),
         state=tuple(str(item) for item in state_payload),
         enabled=bool(payload.get("enabled", True)),
+        href_identity=raw_href_identity(str(payload.get("href") or "")),
     )
 
 
@@ -277,7 +300,9 @@ def build_action_space(
         if element.typeable and element.type_attr in {"password", "file"}:
             continue
         if element.href:
-            key = element.href.split("#", 1)[0]
+            # Identity comes from the raw href digest; the masked href may
+            # collapse two distinct destinations into the same text.
+            key = element.href_identity or element.href.split("#", 1)[0]
             if key in seen_hrefs:
                 continue
             seen_hrefs.add(key)
