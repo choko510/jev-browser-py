@@ -191,9 +191,7 @@ async def test_read_link_javascript_post_is_blocked_by_action_side_effect() -> N
             page = await context.new_page()
             session = await open_session(
                 page=page,
-                network=NetworkPolicy(
-                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
-                ),
+                network=NetworkPolicy(allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True),
             )
             try:
                 await session.navigate(f"{base}/js-post")
@@ -229,15 +227,14 @@ async def test_explicit_write_authorization_allows_post_form() -> None:
             page = await context.new_page()
             session = await open_session(
                 page=page,
-                network=NetworkPolicy(
-                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
-                ),
+                network=NetworkPolicy(allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True),
             )
             try:
                 await session.navigate(f"{base}/post-form")
                 transport = CriteriaTransport(
                     lambda _call, criteria: next(
-                        key for key, description in criteria.items()
+                        key
+                        for key, description in criteria.items()
                         if key.startswith("submit_") and "submit the form now" in description
                     )
                 )

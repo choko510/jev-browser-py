@@ -233,9 +233,7 @@ async def test_read_link_javascript_post_requires_action_scoped_approval(
             page = await context.new_page()
             session = await open_session(
                 page=page,
-                network=NetworkPolicy(
-                    allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True
-                ),
+                network=NetworkPolicy(allowed_origins=(base,), allow_loopback=True, allow_unsafe_methods=True),
             )
             try:
                 await session.navigate(f"{base}/js-post")

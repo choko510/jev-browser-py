@@ -94,10 +94,7 @@ def test_model_url_redaction_masks_unknown_credentials_query_fragment_and_opaque
     path_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-token"
     query_token = "unlisted-query-token-123"
     fragment_token = "fragment-secret-456"
-    url = (
-        f"https://user:{password}@example.test/reset/{path_token}"
-        f"?unrecognized={query_token}#auth={fragment_token}"
-    )
+    url = f"https://user:{password}@example.test/reset/{path_token}?unrecognized={query_token}#auth={fragment_token}"
 
     safe = redact_url_for_model(url)
 

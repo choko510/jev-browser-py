@@ -104,9 +104,7 @@ def select_option_question(element_description: str, options: Sequence[str]) -> 
         raise ValueError("a select question needs at least one option")
     if len(options) > SELECT_OPTION_MAX:
         raise ValueError("too many options for one select question")
-    criteria = {
-        f"o{index}": _clip(redact_urls_in_text(label), 80) or "(empty)" for index, label in enumerate(options)
-    }
+    criteria = {f"o{index}": _clip(redact_urls_in_text(label), 80) or "(empty)" for index, label in enumerate(options)}
     safe_description = redact_urls_in_text(element_description)
     return Choice(
         instructions=(
@@ -130,10 +128,7 @@ def judgment_state(
     the run length.
     """
     safe_history = [
-        {
-            key: redact_urls_in_text(value) if isinstance(value, str) else value
-            for key, value in entry.items()
-        }
+        {key: redact_urls_in_text(value) if isinstance(value, str) else value for key, value in entry.items()}
         for entry in history[-8:]
     ]
     return {

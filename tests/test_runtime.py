@@ -1155,9 +1155,7 @@ async def test_global_deadline_bounds_policy_verifier_and_executor(stage: str, s
     class SlowExecutor:
         calls = 0
 
-        async def execute_one(
-            self, *, proposal: ActionProposal, snapshot: object, **kwargs: object
-        ) -> object:
+        async def execute_one(self, *, proposal: ActionProposal, snapshot: object, **kwargs: object) -> object:
             del snapshot, kwargs
             self.calls += 1
             await asyncio.sleep(1)

@@ -229,6 +229,7 @@ def redact_url_for_model(url: str) -> str:
 
 def redact_urls_in_text(text: str) -> str:
     """Sanitize absolute and token-bearing relative URLs in visible model text."""
+
     def replace(match: re.Match[str]) -> str:
         raw = match.group(0)
         trailing = ""

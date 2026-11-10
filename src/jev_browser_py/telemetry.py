@@ -116,9 +116,7 @@ def run_summary(result: RunResult) -> PublicRunReport:
         input_tokens=result.usage.input_tokens,
         output_tokens=result.usage.output_tokens,
         estimated_cost_usd=(
-            result.estimated_cost_usd
-            if result.estimated_cost_usd is not None
-            else result.usage.estimated_cost_usd()
+            result.estimated_cost_usd if result.estimated_cost_usd is not None else result.usage.estimated_cost_usd()
         ),
         elapsed_seconds=result.elapsed_seconds,
         final_url=result.final_url,

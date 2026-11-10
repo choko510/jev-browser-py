@@ -62,8 +62,17 @@ def test_required_browser_session_fails_if_all_items_skip(monkeypatch: pytest.Mo
 
 def test_typing_cost_upper_bound_is_configurable() -> None:
     args = build_parser().parse_args(
-        ["g", "--url", "https://x/", "--typing-base-url", "http://localhost:11434/v1",
-         "--typing-model", "local", "--typing-max-cost-per-call", "0"]
+        [
+            "g",
+            "--url",
+            "https://x/",
+            "--typing-base-url",
+            "http://localhost:11434/v1",
+            "--typing-model",
+            "local",
+            "--typing-max-cost-per-call",
+            "0",
+        ]
     )
     assert args.typing_max_cost_per_call == 0.0
 

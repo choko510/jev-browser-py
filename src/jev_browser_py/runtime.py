@@ -952,9 +952,7 @@ async def suggest_next_action(
         cost_budget.reserve(transport, {"state": state, "questions": questions})
     except _CostBudgetError as error:
         raise BudgetExceededError(str(error)) from error
-    reply = await _await_before_deadline(
-        transport.judge(state=state, questions=questions, deadline=deadline), deadline
-    )
+    reply = await _await_before_deadline(transport.judge(state=state, questions=questions, deadline=deadline), deadline)
     judgment = validate_step_reply(
         reply,
         action_space=snapshot.action_space,
