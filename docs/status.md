@@ -28,7 +28,7 @@ python -m pytest -q                                      -> 253 passed
 python -m pytest -q -m "not browser"                     -> 238 passed, 15 deselected
 JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 15 passed, 238 deselected; no skips
 python -m ruff check --no-cache .                       -> All checks passed
-python -m ruff format --check .                          -> 37 files already formatted
+python -m ruff format --check .                          -> 38 files already formatted
 python -m mypy src/jev_browser_py                       -> Success: no issues found (17 files)
 python -m build                                          -> sdist + wheel built from this worktree
 python examples/local_task.py                           -> status success, verified True (3 actions)
@@ -38,7 +38,7 @@ python examples/local_task.py                           -> status success, verif
 prior HEAD `04939bc`, but its browser job logged 12 skipped and 219 deselected.
 That run is not evidence that browser tests executed. The workflow now uses the
 same absolute browser path for installation and testing, disables skip marks in
-required mode, and fails if no browser test passes. Run `42823111903` on `b4d9f5d` passed all jobs; both browser jobs logged 15 passed and 238 deselected.
+required mode, and fails if no browser test passes. Run `42823111903` on `b4d9f5d` passed all jobs. After extracting provider-budget regressions to `test_provider_budgets.py`, current run `42826391344` on `9afe9a7` also passed every job; each browser log reported 15 passed and 238 deselected.
 
 Browser tests (real Chromium, loopback fixtures, scripted judgment): 15 passed
 locally with required mode enabled. They include the verified search path, a
@@ -97,7 +97,7 @@ is used.
 | No unmeasured performance claim | README + benchmark `not measured` field |
 
 **Remaining release gaps:** the upstream TypeScript comparison and paid live
-smoke are unmeasured here. GitHub Actions run `42823111903` on `b4d9f5d` passed all jobs. Cost control fails closed on unknown estimates but is not a
+smoke are unmeasured here. GitHub Actions run `42826391344` on `9afe9a7` passed all jobs. Cost control fails closed on unknown estimates but is not a
 provider-enforced invoice cap. The Python network guard remains best-effort and
 is not an egress firewall; use verified external isolation before untrusted
 public access. PR #1 remains Draft; these are explicit gaps, not a v1.0

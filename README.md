@@ -196,13 +196,14 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | `python -m pytest -q -m "not browser"` (offline) | 238 passed, 15 deselected |
 | `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 15 passed, 238 deselected; no browser skips |
 | `python -m ruff check --no-cache .` | all checks passed |
-| `python -m ruff format --check .` | 37 files already formatted |
+| `python -m ruff format --check .` | 38 files already formatted |
 | `python -m mypy src/jev_browser_py` | no issues (17 files) |
 | `python -m build` | sdist + wheel built from the remediation worktree |
 | `python examples/local_task.py` | `success`, `verified: True` (3 actions) |
 | GitHub Actions run `42648478807` on prior HEAD `04939bc` | jobs reported green, but browser logs showed 12 skipped and 219 deselected; not accepted as browser execution evidence |
 | First remediation CI `42677681232` (`aac681c`) | browser/package jobs passed; quality jobs failed only at Ruff formatting, fixed in `b4d9f5d` |
 | GitHub Actions rerun `42823111903` (`b4d9f5d`) | all jobs passed; each Chromium job reported 15 passed, 238 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` |
+| Latest GitHub Actions `42826391344` (`9afe9a7`) | all jobs passed after test-module split; both Chromium jobs reported 15 passed, 238 deselected |
 | `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
