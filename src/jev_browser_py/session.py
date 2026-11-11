@@ -255,6 +255,7 @@ async def _safe_abort(route: Any) -> None:
 _PAGE_LOCKS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Lock]] = {}
 _PAGE_NETWORK_POLICIES: dict[int, tuple[weakref.ReferenceType[Any], NetworkPolicy]] = {}
 _CONTEXT_NETWORK_POLICIES: dict[int, tuple[weakref.ReferenceType[Any], NetworkPolicy]] = {}
+_CONTEXT_PAGES: dict[int, tuple[weakref.ReferenceType[Any], dict[int, weakref.ReferenceType[Any]]]] = {}
 _PAGE_ABANDONED_OPS: dict[int, tuple[weakref.ReferenceType[Any], asyncio.Future[Any]]] = {}
 _PAGE_LOCKS_GUARD = threading.RLock()
 
@@ -325,6 +326,54 @@ def _release_context_network_policy(context: Any, policy: NetworkPolicy) -> None
         current = _CONTEXT_NETWORK_POLICIES.get(key)
         if current is not None and current[0]() is context and current[1] is policy:
             del _CONTEXT_NETWORK_POLICIES[key]
+
+
+def _register_context_page(context: Any, page: Any) -> None:
+    """Remember that this Page belongs to this Context."""
+    key = id(context)
+    page_key = id(page)
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_PAGES.get(key)
+        if current is None or current[0]() is not context:
+            reference = weakref.ref(context, lambda ref: _forget_context_pages(key, ref))
+            pages: dict[int, weakref.ReferenceType[Any]] = {}
+            _CONTEXT_PAGES[key] = (reference, pages)
+        else:
+            pages = current[1]
+        if page_key not in pages:
+            pages[page_key] = weakref.ref(page, lambda ref: _forget_context_page(key, page_key, ref))
+
+
+def _forget_context_page(key: int, page_key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_PAGES.get(key)
+        if current is not None and current[1].get(page_key) is reference:
+            del current[1][page_key]
+
+
+def _forget_context_pages(key: int, reference: weakref.ReferenceType[Any]) -> None:
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_PAGES.get(key)
+        if current is not None and current[0] is reference:
+            del _CONTEXT_PAGES[key]
+
+
+def _context_is_shared(context: Any) -> bool:
+    """True when more than one Page belongs to this Context.
+
+    A WebSocket route exposes no Page, so an active write grant cannot be
+    attributed to the socket's owner. When a Context holds several Pages, Page
+    B's message could ride on Page A's approval; treat the Context as shared and
+    refuse the send instead of guessing.
+    """
+    with _PAGE_LOCKS_GUARD:
+        current = _CONTEXT_PAGES.get(id(context))
+        registered = len(current[1]) if current is not None and current[0]() is context else 0
+    try:
+        observed = len(context.pages)
+    except Exception:  # noqa: BLE001 - a Context without `pages` relies on the registry
+        observed = 0
+    return max(registered, observed) > 1
 
 
 def _record_abandoned_page_operation(page: Any, operation: asyncio.Future[Any]) -> None:
@@ -505,9 +554,12 @@ class BrowserSession:
 
             def _forward(message: str | bytes) -> None:
                 # Default deny: a read-only action never authorizes a client
-                # message, and Playwright cannot attribute the socket to a Page.
-                if policy.websocket_send_allowed():
-                    server_route.send(message)
+                # message. A socket route exposes no Page, so a shared Context
+                # would let one Page's grant authorize another Page's traffic;
+                # that ambiguity is refused rather than resolved by guessing.
+                if not policy.websocket_send_allowed() or _context_is_shared(context):
+                    return
+                server_route.send(message)
 
             route.on_message(_forward)
 
@@ -518,6 +570,7 @@ class BrowserSession:
             await websocket_route("**/*", _websocket_handler)
             await context.route("**/*", _route_handler)
             _register_page_network_policy(self.page, policy)
+            _register_context_page(context, self.page)
         except Exception as error:
             if claimed:
                 _release_context_network_policy(context, policy)

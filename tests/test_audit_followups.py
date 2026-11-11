@@ -31,6 +31,7 @@ class _RecordingContext:
     def __init__(self) -> None:
         self.http_handler: object | None = None
         self.websocket_handler: object | None = None
+        self.pages: list[object] = []
 
     async def route(self, pattern: str, handler: object) -> None:
         assert pattern == "**/*"
@@ -398,3 +399,205 @@ def _zero_cost_transport(action: str) -> object:
     from jev_browser_py.transport import MockTransport
 
     return MockTransport([step_reply(sample_action_space(), action)])
+
+
+async def test_a_later_page_cannot_borrow_another_pages_websocket_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A socket route has no Page, so a shared Context must refuse the send."""
+    _public_dns(monkeypatch)
+    context = _RecordingContext()
+    policy = NetworkPolicy(allowed_origins=("https://allowed.example",), allow_unsafe_methods=True)
+    first_page = FakePage(url="https://allowed.example/a")
+    second_page = FakePage(url="https://allowed.example/b")
+    first = _session(first_page, context, policy)
+    second = _session(second_page, context, policy)
+    await first.install_guard()
+    await second.install_guard()
+    context.pages = [first_page, second_page]
+
+    socket_route = _WebSocketRoute("wss://allowed.example/socket")
+    handler = context.websocket_handler
+    assert callable(handler)
+    await handler(socket_route)
+    forward = socket_route.message_handler
+    assert callable(forward)
+
+    # Page A holds the grant, but the socket may belong to Page B. Neither
+    # message is forwarded because the Context is shared.
+    with policy.authorize_unsafe_requests(first_page):
+        forward("from page A")
+        forward("from page B")
+    assert socket_route.server.sent == []
+
+
+async def test_a_single_page_context_still_forwards_during_an_authorized_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _public_dns(monkeypatch)
+    context = _RecordingContext()
+    policy = NetworkPolicy(allowed_origins=("https://allowed.example",), allow_unsafe_methods=True)
+    page = FakePage(url="https://allowed.example/")
+    session = _session(page, context, policy)
+    await session.install_guard()
+    context.pages = [page]
+
+    socket_route = _WebSocketRoute("wss://allowed.example/socket")
+    handler = context.websocket_handler
+    assert callable(handler)
+    await handler(socket_route)
+    forward = socket_route.message_handler
+    assert callable(forward)
+
+    with policy.authorize_unsafe_requests(page):
+        forward("authorized")
+    assert socket_route.server.sent == ["authorized"]
+
+
+async def test_an_external_task_cancel_records_a_operation_that_keeps_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`asyncio.Task.cancel()` must block later runs, not only a deadline miss."""
+    monkeypatch.setattr("jev_browser_py.runtime.DEADLINE_SETTLE_SECONDS", 0.05)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class StubbornExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute_one(self, *, proposal: object, snapshot: object, **kwargs: object) -> object:
+            del proposal, snapshot, kwargs
+            self.calls += 1
+            started.set()
+            while not release.is_set():
+                try:
+                    await asyncio.wait_for(release.wait(), timeout=0.01)
+                except (TimeoutError, asyncio.CancelledError):
+                    continue
+            return SimpleNamespace(state=SimpleNamespace(value="acted"), detail="acted", error_code=None)
+
+    page = FakePage()
+    stubborn = StubbornExecutor()
+    stubborn.page = page  # type: ignore[attr-defined]
+    snapshotter = FakeSnapshotter([make_snapshot(action_space=sample_action_space())])
+    snapshotter.page = page  # type: ignore[attr-defined]
+
+    run_task = asyncio.create_task(
+        run(
+            "scroll",
+            transport=_zero_cost_transport("scroll_down"),
+            snapshotter=snapshotter,
+            executor=stubborn,
+            limits=RunLimits(max_steps=1, max_seconds=30),
+        )
+    )
+    from jev_browser_py.session import _pending_page_operation
+
+    await asyncio.wait_for(started.wait(), timeout=5)
+    run_task.cancel()
+    # Always let the stubborn child finish, even when an assertion fails: a
+    # regression must fail the test, never hang the suite.
+    try:
+        outcomes = await asyncio.gather(run_task, return_exceptions=True)
+        assert isinstance(outcomes[0], asyncio.CancelledError)
+        assert stubborn.calls == 1
+
+        # The fix under test: an external cancel records the child that refused
+        # to stop, so the Page is visibly still occupied at this moment.
+        assert _pending_page_operation(page) is not None
+
+        second_snapshotter = FakeSnapshotter([make_snapshot(action_space=sample_action_space())])
+        second_snapshotter.page = page  # type: ignore[attr-defined]
+        second_executor = FakeExecutor()
+        second_executor.page = page  # type: ignore[attr-defined]
+        second = await run(
+            "scroll",
+            transport=_zero_cost_transport("scroll_down"),
+            snapshotter=second_snapshotter,
+            executor=second_executor,
+            limits=RunLimits(max_steps=1, max_seconds=0.05),
+        )
+
+        assert second.status is RunStatus.BLOCKED
+        assert second.error_code is ErrorCode.UNKNOWN_EFFECT
+        assert second_snapshotter.observed == []
+        assert second_executor.action_count == 0
+    finally:
+        release.set()
+        await asyncio.sleep(0.05)
+
+    assert _pending_page_operation(page) is None
+
+    third_snapshotter = FakeSnapshotter([make_snapshot(action_space=sample_action_space())])
+    third_snapshotter.page = page  # type: ignore[attr-defined]
+    third_executor = FakeExecutor()
+    third_executor.page = page  # type: ignore[attr-defined]
+    third = await run(
+        "scroll",
+        transport=_zero_cost_transport("scroll_down"),
+        snapshotter=third_snapshotter,
+        executor=third_executor,
+        limits=RunLimits(max_steps=1, max_seconds=5),
+    )
+
+    assert third.status is not RunStatus.BLOCKED
+    assert third_executor.action_count == 1
+
+
+async def test_an_external_cancel_that_the_operation_honours_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("jev_browser_py.runtime.DEADLINE_SETTLE_SECONDS", 0.05)
+    started = asyncio.Event()
+
+    class CooperativeExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute_one(self, *, proposal: object, snapshot: object, **kwargs: object) -> object:
+            del proposal, snapshot, kwargs
+            self.calls += 1
+            started.set()
+            await asyncio.sleep(30)
+            raise AssertionError("cancelled operation must not return")
+
+    page = FakePage()
+    executor = CooperativeExecutor()
+    executor.page = page  # type: ignore[attr-defined]
+    snapshotter = FakeSnapshotter([make_snapshot(action_space=sample_action_space())])
+    snapshotter.page = page  # type: ignore[attr-defined]
+
+    run_task = asyncio.create_task(
+        run(
+            "scroll",
+            transport=_zero_cost_transport("scroll_down"),
+            snapshotter=snapshotter,
+            executor=executor,
+            limits=RunLimits(max_steps=1, max_seconds=30),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    run_task.cancel()
+    outcomes = await asyncio.gather(run_task, return_exceptions=True)
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+
+    from jev_browser_py.session import _pending_page_operation
+
+    # A child that stopped promptly leaves no lasting block on the Page.
+    assert _pending_page_operation(page) is None
+
+    second_snapshotter = FakeSnapshotter([make_snapshot(action_space=sample_action_space())])
+    second_snapshotter.page = page  # type: ignore[attr-defined]
+    second_executor = FakeExecutor()
+    second_executor.page = page  # type: ignore[attr-defined]
+    second = await run(
+        "scroll",
+        transport=_zero_cost_transport("scroll_down"),
+        snapshotter=second_snapshotter,
+        executor=second_executor,
+        limits=RunLimits(max_steps=1, max_seconds=5),
+    )
+
+    assert second.status is not RunStatus.BLOCKED
+    assert second_executor.action_count == 1

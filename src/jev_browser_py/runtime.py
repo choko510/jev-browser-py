@@ -202,19 +202,34 @@ async def _await_before_deadline[T](
         completed, _ = await asyncio.wait((task,), timeout=remaining)
     except asyncio.CancelledError:
         task.cancel()
-        with contextlib.suppress(Exception):
-            await asyncio.wait((task,), timeout=settle)
+        try:
+            with contextlib.suppress(Exception):
+                await asyncio.wait((task,), timeout=settle)
+        finally:
+            _settle_cancelled_child(task, page)
         raise
     if task not in completed:
         task.cancel()
-        settled, _ = await asyncio.wait((task,), timeout=settle)
-        if task in settled:
-            _consume_cancelled_task(task)
-        else:
-            _record_abandoned_operation(page, task)
-            task.add_done_callback(_consume_cancelled_task)
+        try:
+            with contextlib.suppress(Exception):
+                await asyncio.wait((task,), timeout=settle)
+        finally:
+            _settle_cancelled_child(task, page)
         raise TimeoutError("run deadline expired")
     return task.result()
+
+
+def _settle_cancelled_child(task: asyncio.Future[Any], page: Any | None) -> None:
+    """Consume a cancelled child; record it when it is still running.
+
+    Runs in a `finally` block so a second cancel during the settle wait cannot
+    skip the record and let a later run overlap the abandoned operation.
+    """
+    if task.done():
+        _consume_cancelled_task(task)
+        return
+    _record_abandoned_operation(page, task)
+    task.add_done_callback(_consume_cancelled_task)
 
 
 def _record_abandoned_operation(page: Any | None, operation: asyncio.Future[Any]) -> None:

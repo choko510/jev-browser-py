@@ -150,6 +150,8 @@ does not enable localhost.
   `max_seconds`; a run that cannot get the Page in time is `TIMEOUT` and touches nothing.
   If a cancelled page operation does not stop within its settle window, later runs wait for it
   and then report `BLOCKED`/`UNKNOWN_EFFECT` instead of acting on a Page that may still be in use.
+  This applies to an external `asyncio.Task.cancel()` as well as a run-deadline expiry: the child
+  operation is always cancelled, awaited for the settle window, and recorded when it refuses to stop.
   Freshness is checked against the exact proposal snapshot and a fresh live fingerprint
   immediately before dispatch. Direct `SingleActionExecutor.execute_one()` callers must
   install/use a guarded session, supply `current_snapshot`, coordinate that same Page lock,
@@ -201,9 +203,9 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q` (all) | 266 passed |
-| `python -m pytest -q -m "not browser"` (offline) | 248 passed, 18 deselected |
-| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 18 passed, 248 deselected; no browser skips |
+| `python -m pytest -q` (all) | 270 passed |
+| `python -m pytest -q -m "not browser"` (offline) | 252 passed, 18 deselected |
+| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 18 passed, 252 deselected; no browser skips |
 | `python -m ruff check --no-cache .` | all checks passed |
 | `python -m ruff format --check .` | 40 files already formatted |
 | `python -m mypy src/jev_browser_py` | no issues (17 files) |

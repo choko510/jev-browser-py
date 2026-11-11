@@ -57,7 +57,10 @@ than pretending to succeed.
   is active for that same Page. Page-to-server WebSocket messages are dropped by
   default and forwarded only inside that same authorized write scope; a socket
   route exposes no Page, so a read-only action can never authorize a message.
-  The CLI `--allow-external-write` enables both the ActionPolicy and network gates.
+  Because that route cannot name its Page, a **Context holding more than one Page
+  refuses WebSocket sends entirely** rather than letting Page B ride on Page A's
+  grant; keep write-capable runs on a dedicated single-Page Context. The CLI
+  `--allow-external-write` enables both the ActionPolicy and network gates.
   The guard is *not* an egress firewall: preconnects, existing service workers, DNS
   rebinding, and platform-level traffic may bypass the Python layer. Use a dedicated
   Context and real isolation for untrusted goals.
@@ -73,7 +76,10 @@ than pretending to succeed.
   page operation is awaited for a bounded settle window; if it still has not
   stopped, later runs wait for it and then report `BLOCKED` with
   `UNKNOWN_EFFECT` rather than acting on a Page that may still be in use. The
-  deadline cannot recall a request already accepted by a remote provider; the
+  same recording applies when a caller cancels the run task directly with
+  `asyncio.Task.cancel()`, so an externally cancelled run cannot leave a browser
+  operation running unsupervised. The deadline cannot recall a request already
+  accepted by a remote provider; the
   OpenAI-compatible typing request receives the remaining timeout, while a
   cancelled worker may take time to terminate.
 - **Cost budget:** each Jev transport and text generator must implement

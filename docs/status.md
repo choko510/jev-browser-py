@@ -24,9 +24,9 @@ Environment: Windows 11, Python 3.14.3, Playwright 1.64.1 (bundled Chromium),
 Scrapling 0.5.1, TypeSafe SDK 0.7.5.
 
 ```
-python -m pytest -q                                      -> 266 passed
-python -m pytest -q -m "not browser"                     -> 248 passed, 18 deselected
-JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 18 passed, 248 deselected; no skips
+python -m pytest -q                                      -> 270 passed
+python -m pytest -q -m "not browser"                     -> 252 passed, 18 deselected
+JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser -> 18 passed, 252 deselected; no skips
 python -m ruff check --no-cache .                       -> All checks passed
 python -m ruff format --check .                          -> 40 files already formatted
 python -m mypy src/jev_browser_py                       -> Success: no issues found (17 files)
@@ -54,6 +54,8 @@ public site is used.
 |---|---|---|
 | Shared Context could apply a later route's policy to all Pages | `session.py` `_register_context_network_policy` | `test_audit_followups.py`, `test_e2e_audit_followups.py` |
 | WebSocket client messages were forwarded unconditionally | `session.py` `_websocket_handler` | `test_audit_followups.py` (default deny, authorized send, disabled policy) |
+| A Page could borrow another Page's WebSocket approval in a shared Context | `session.py` `_context_is_shared` | `test_audit_followups.py` (shared Context refuses send; single-Page Context still forwards) |
+| External `asyncio.Task.cancel()` did not record an operation that kept running | `runtime.py` `_settle_cancelled_child` | `test_audit_followups.py` (stubborn child blocks the next run; cooperative child leaves no block) |
 | Masked URLs could collapse distinct links | `action_space.py` `raw_href_identity`, `snapshot.py` | `test_audit_followups.py`, `test_e2e_audit_followups.py` |
 | Page-lock wait was outside `max_seconds`; a timed-out operation could overlap a later Run | `runtime.py` `_await_before_deadline`, `run()` | `test_audit_followups.py` (lock-wait timeout, abandoned-operation block) |
 
