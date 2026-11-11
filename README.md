@@ -219,6 +219,7 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 | Follow-up audit fixes (local) | 266 passed; offline 248; required Chromium 18 passed with no skips; Ruff, format (40 files), mypy, build, import smoke all pass |
 | GitHub Actions run `42847147775` (`41e1898`) | Chromium and package jobs passed; both quality jobs failed only at Ruff format (one blank line in `runtime.py`), fixed in `e0ca163` |
 | GitHub Actions run `42847672732` (`e0ca163`) | all jobs passed; both required Chromium jobs reported 18 passed, 248 deselected with `JEV_REQUIRE_BROWSER_TESTS=1` and no skips; offline jobs reported 248 passed, 12 deselected |
+| Two-P1 run `43040016245` (`3aa9a1e`) | quality/offline and package jobs passed; both Chromium jobs failed inside `playwright install --with-deps` because the runner could not resolve `archive.ubuntu.com` / `security.ubuntu.com`. Three attempts failed identically with 104 DNS errors; no browser test executed, so this run is not browser evidence for or against the commit |
 | `scripts/benchmark.py --iterations 5` | not rerun for this remediation; previous local measurements are historical only |
 
 **Not executed here:** the paid TypeSafe live smoke (no API key in this environment) and
