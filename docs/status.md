@@ -111,14 +111,14 @@ public site is used.
 | Reproducible benchmark recorded | `.artifacts/benchmark.json` (scripted local fixture only) |
 | No unmeasured performance claim | README + benchmark `not measured` field |
 
-**Browser-CI availability incident:** run `43040016245` (`3aa9a1e`) passed its
-quality/offline and package jobs, but both Chromium jobs failed during
-`python -m playwright install --with-deps chromium`: the hosted runner could not
-resolve `archive.ubuntu.com` / `security.ubuntu.com` (104 `Temporary failure
-resolving` errors across three attempts). No browser test started, so that run
-is neither evidence for nor against the commit. The same fixes passed locally
-with required mode enabled (18 browser tests). Re-run when runner DNS recovers
-to obtain hosted browser evidence for this head.
+**Browser-CI availability incident (resolved):** run `43040016245` (`3aa9a1e`)
+passed its quality/offline and package jobs, but both Chromium jobs failed
+during `python -m playwright install --with-deps chromium`: the hosted runner
+could not resolve `archive.ubuntu.com` / `security.ubuntu.com` (104 `Temporary
+failure resolving` errors across three attempts), so no browser test started.
+After the outage cleared, run `43045679104` (`d9ab788`) passed every job: both
+required Chromium jobs reported 18 passed / 252 deselected with no skips, and
+the offline jobs reported 252 passed / 12 deselected.
 
 **Remaining release gaps:** the upstream TypeScript comparison and paid live
 smoke are unmeasured here. Follow-up audit CI run `42847672732` on `e0ca163`
