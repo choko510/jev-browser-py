@@ -75,7 +75,7 @@ class NetworkPolicy:
     block_downloads: bool = True
     block_new_tabs: bool = False
     _unsafe_pages: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
-    _authorized_writes: int = field(default=0, init=False, repr=False, compare=False)
+    _authorized_contexts: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
     _unsafe_pages_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -115,37 +115,51 @@ class NetworkPolicy:
         return explicitly_allowed
 
     @contextlib.contextmanager
-    def authorize_unsafe_requests(self, page: Any) -> Iterator[None]:
+    def authorize_unsafe_requests(self, page: Any, *, context: Any | None = None) -> Iterator[None]:
         """Scope mutating traffic to one caller-approved Page action.
 
-        The scope covers unsafe HTTP methods for that Page and page->server
-        WebSocket messages for the policy's whole Context, because Playwright
-        exposes no Page on a WebSocket route. A Context now carries exactly one
-        policy, so this counter cannot leak across policies.
+        Two grants are tracked because the two gates need different
+        granularity: unsafe HTTP methods are keyed by the requesting Page, and
+        WebSocket sends are keyed by the *Context*, since a socket route exposes
+        no Page. Keying the socket grant by Context rather than by this policy
+        object is what stops one policy instance shared by two Contexts from
+        letting Context B ride on Context A's approval.
         """
         if not self.allow_unsafe_methods:
             raise NetworkGuardError("unsafe HTTP methods are disabled by the network policy")
+        resolved_context = context if context is not None else getattr(page, "context", None)
         key = id(page)
+        context_key = id(resolved_context) if resolved_context is not None else None
         with self._unsafe_pages_lock:
             self._unsafe_pages[key] = self._unsafe_pages.get(key, 0) + 1
-            self._authorized_writes += 1
+            if context_key is not None:
+                self._authorized_contexts[context_key] = self._authorized_contexts.get(context_key, 0) + 1
         try:
             yield
         finally:
             with self._unsafe_pages_lock:
-                self._authorized_writes = max(0, self._authorized_writes - 1)
+                if context_key is not None:
+                    remaining_writes = self._authorized_contexts.get(context_key, 0) - 1
+                    if remaining_writes > 0:
+                        self._authorized_contexts[context_key] = remaining_writes
+                    else:
+                        self._authorized_contexts.pop(context_key, None)
                 remaining = self._unsafe_pages.get(key, 0) - 1
                 if remaining > 0:
                     self._unsafe_pages[key] = remaining
                 else:
                     self._unsafe_pages.pop(key, None)
 
-    def websocket_send_allowed(self) -> bool:
-        """True only while an explicitly authorized write action is active."""
-        if not self.allow_unsafe_methods:
+    def websocket_send_allowed(self, context: Any | None) -> bool:
+        """True only for the Context that holds an active authorized write.
+
+        A missing Context is denied: without one there is no way to tell whose
+        approval the socket would be spending.
+        """
+        if not self.allow_unsafe_methods or context is None:
             return False
         with self._unsafe_pages_lock:
-            return self._authorized_writes > 0
+            return self._authorized_contexts.get(id(context), 0) > 0
 
     def request_method_allowed(self, method: str, page: Any | None) -> bool:
         if method.upper() in _SAFE_HTTP_METHODS:
@@ -412,7 +426,7 @@ def _pending_page_operation(page: Any) -> asyncio.Future[Any] | None:
 def _authorize_unsafe_requests_for_page(page: Any, *, allowed: bool) -> Iterator[None]:
     policy = _network_policy_for_page(page)
     if allowed and policy is not None and policy.allow_unsafe_methods:
-        with policy.authorize_unsafe_requests(page):
+        with policy.authorize_unsafe_requests(page, context=getattr(page, "context", None)):
             yield
     else:
         yield
@@ -455,7 +469,7 @@ class BrowserSession:
     @contextlib.contextmanager
     def authorize_unsafe_requests(self) -> Iterator[None]:
         """Explicitly authorize unsafe HTTP methods during one manual action."""
-        with self.network.authorize_unsafe_requests(self.page):
+        with self.network.authorize_unsafe_requests(self.page, context=self.owner.context):
             yield
 
     async def navigate(self, url: str, *, timeout_ms: int = 15_000) -> None:
@@ -554,10 +568,10 @@ class BrowserSession:
 
             def _forward(message: str | bytes) -> None:
                 # Default deny: a read-only action never authorizes a client
-                # message. A socket route exposes no Page, so a shared Context
-                # would let one Page's grant authorize another Page's traffic;
-                # that ambiguity is refused rather than resolved by guessing.
-                if not policy.websocket_send_allowed() or _context_is_shared(context):
+                # message. The grant is Context-scoped because a socket route
+                # exposes no Page, so neither another Page in this Context nor
+                # another Context sharing this policy may spend it.
+                if not policy.websocket_send_allowed(context) or _context_is_shared(context):
                     return
                 server_route.send(message)
 

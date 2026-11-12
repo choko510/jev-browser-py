@@ -186,7 +186,7 @@ async def test_websocket_messages_are_dropped_without_an_authorized_write(
     forward("read-only probe")
     assert socket_route.server.sent == []
 
-    with session.network.authorize_unsafe_requests(page):
+    with session.network.authorize_unsafe_requests(page, context=context):
         forward("authorized write")
     assert socket_route.server.sent == ["authorized write"]
 
@@ -211,7 +211,7 @@ async def test_websocket_messages_never_forward_when_unsafe_methods_are_disabled
     assert callable(forward)
     forward("anything")
     assert socket_route.server.sent == []
-    assert session.network.websocket_send_allowed() is False
+    assert session.network.websocket_send_allowed(context) is False
 
 
 def test_distinct_raw_urls_that_mask_identically_survive_dedupe() -> None:
@@ -425,10 +425,55 @@ async def test_a_later_page_cannot_borrow_another_pages_websocket_approval(
 
     # Page A holds the grant, but the socket may belong to Page B. Neither
     # message is forwarded because the Context is shared.
-    with policy.authorize_unsafe_requests(first_page):
+    with policy.authorize_unsafe_requests(first_page, context=context):
         forward("from page A")
         forward("from page B")
     assert socket_route.server.sent == []
+
+
+async def test_two_contexts_sharing_one_policy_do_not_share_a_websocket_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single policy instance used by two Contexts must not pool approvals."""
+    _public_dns(monkeypatch)
+    policy = NetworkPolicy(allowed_origins=("https://allowed.example",), allow_unsafe_methods=True)
+
+    context_a = _RecordingContext()
+    context_b = _RecordingContext()
+    page_a = FakePage(url="https://allowed.example/a")
+    page_b = FakePage(url="https://allowed.example/b")
+    session_a = _session(page_a, context_a, policy)
+    session_b = _session(page_b, context_b, policy)
+    await session_a.install_guard()
+    await session_b.install_guard()
+    context_a.pages = [page_a]
+    context_b.pages = [page_b]
+
+    socket_a = _WebSocketRoute("wss://allowed.example/socket")
+    socket_b = _WebSocketRoute("wss://allowed.example/socket")
+    handler_a = context_a.websocket_handler
+    handler_b = context_b.websocket_handler
+    assert callable(handler_a)
+    assert callable(handler_b)
+    await handler_a(socket_a)
+    await handler_b(socket_b)
+    forward_a = socket_a.message_handler
+    forward_b = socket_b.message_handler
+    assert callable(forward_a)
+    assert callable(forward_b)
+
+    # Context A's write approval is active, but it belongs to A only.
+    with policy.authorize_unsafe_requests(page_a, context=context_a):
+        forward_b("context B message")
+        assert socket_b.server.sent == []
+        forward_a("context A message")
+        assert socket_a.server.sent == ["context A message"]
+
+    # After A's scope ends, neither Context may send.
+    forward_a("after A scope")
+    forward_b("after A scope")
+    assert socket_a.server.sent == ["context A message"]
+    assert socket_b.server.sent == []
 
 
 async def test_a_single_page_context_still_forwards_during_an_authorized_write(
@@ -449,7 +494,7 @@ async def test_a_single_page_context_still_forwards_during_an_authorized_write(
     forward = socket_route.message_handler
     assert callable(forward)
 
-    with policy.authorize_unsafe_requests(page):
+    with policy.authorize_unsafe_requests(page, context=context):
         forward("authorized")
     assert socket_route.server.sent == ["authorized"]
 

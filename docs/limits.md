@@ -59,8 +59,11 @@ than pretending to succeed.
   route exposes no Page, so a read-only action can never authorize a message.
   Because that route cannot name its Page, a **Context holding more than one Page
   refuses WebSocket sends entirely** rather than letting Page B ride on Page A's
-  grant; keep write-capable runs on a dedicated single-Page Context. The CLI
-  `--allow-external-write` enables both the ActionPolicy and network gates.
+  grant; keep write-capable runs on a dedicated single-Page Context. The socket
+  grant is also recorded **per Context**, so two Contexts that happen to share
+  one `NetworkPolicy` instance never pool approvals: Context B cannot send while
+  Context A holds the write scope. The CLI `--allow-external-write` enables both
+  the ActionPolicy and network gates.
   The guard is *not* an egress firewall: preconnects, existing service workers, DNS
   rebinding, and platform-level traffic may bypass the Python layer. Use a dedicated
   Context and real isolation for untrusted goals.

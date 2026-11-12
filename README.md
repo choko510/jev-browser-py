@@ -203,9 +203,9 @@ Executed in this workspace (Windows, Python 3.14.3, Playwright 1.64.1, bundled C
 
 | Command | Result |
 |---|---|
-| `python -m pytest -q` (all) | 270 passed |
-| `python -m pytest -q -m "not browser"` (offline) | 252 passed, 18 deselected |
-| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 18 passed, 252 deselected; no browser skips |
+| `python -m pytest -q` (all) | 271 passed |
+| `python -m pytest -q -m "not browser"` (offline) | 253 passed, 18 deselected |
+| `JEV_REQUIRE_BROWSER_TESTS=1 python -m pytest -q -m browser` | 18 passed, 253 deselected; no browser skips |
 | `python -m ruff check --no-cache .` | all checks passed |
 | `python -m ruff format --check .` | 40 files already formatted |
 | `python -m mypy src/jev_browser_py` | no issues (17 files) |
