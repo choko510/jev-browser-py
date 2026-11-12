@@ -1,6 +1,6 @@
 # Python Jev Browser — 実装指南書 / Implementation Guide
 
-> **状態:** Draft / 計画のみ（2026-11-09 JST）。このリポジトリのPython実装・ブラウザテスト・ベンチマークはまだ存在しません。文中のインターフェイスは提案であり、実装済みAPIではありません。
+> **状態:** Draft / 実装レビュー中（2026-11-09 JST）。コード・テスト・ベンチマークは追加済みですが、セキュリティ境界とリリースGateの検証が未完了です。実装・テスト・未実施項目は `docs/status.md` を参照してください。未検証のインターフェイスは引き続き提案扱いです。
 >
 > **開発ゴール:** Jev Browserの「型付き判断で一操作を選ぶ」強みをPythonネイティブで再実装し、PlaywrightとScraplingを組み合わせた、単体で使える安全なブラウザシステムを完成させる。その後に `choko510/aiagent-md` のBrowser Workerへ統合可能な設計にする。
 
@@ -132,9 +132,13 @@ jev-browser-py/
 以下は**期待契約（提案）**であり、署名やフィールド名は実装時に型・互換性のテストで決定する。
 
 ```python
+from collections.abc import Mapping
 from typing import Protocol
 
-class JevTransport(Protocol):
+class CostEstimator(Protocol):
+    def estimate_max_cost_usd(self, request: Mapping[str, object]) -> float | None: ...
+
+class JevTransport(CostEstimator, Protocol):
     async def judge(self, *, state: object, questions: object,
                     deadline: float) -> object: ...
 
@@ -162,7 +166,7 @@ class OutcomeVerifier(Protocol):
 - `ActionProposal`: suggestion + snapshot/goal revision + side-effect class（`read`, `ambiguous`, `external_write` 等）。
 - `ActionOutcome`: `observed`、`acted`、`stale`、`uncertain`、`blocked`、`needs_human`、`cancelled` 等。DOM変化と送信成功を混同しない。
 - `RunResult`: `status`、終了理由、`verified`真偽、step数、利用量、出典・証跡ref、redacted step trace。
-- `RunLimits`: `max_steps`、`max_seconds`、`max_jev_calls`、`max_cost`、`max_page_bytes`、`max_actions_per_run`。すべて有限かつ強制。
+- `RunLimits`: `max_steps`、`max_seconds`、`max_jev_calls`、`max_cost`、`max_page_bytes`、`max_actions_per_run`。時間・呼出し数・ページ量は実行ループで強制し、費用はproviderごとの`CostEstimator`上限を予約してestimate不明なら呼び出し前に拒否する。外部請求額を固定するprovider側の請求上限ではない。
 - `ErrorCode`: `INVALID_JUDGMENT`、`STALE_TARGET`、`POLICY_DENIED`、`TIMEOUT`、`CANCELLED`、`CHALLENGE`、`UNKNOWN_EFFECT`、`NEEDS_HUMAN` 等。ライブラリ例外とユーザー向け状態を混同しない。
 
 **IDの所有権:** Standaloneの一時IDはHarnessのcanonical `taskId/runId/tenantId/leaseEpoch/goalRevision` と同一と仮定しない。後日のAdapterが明示的に翻訳する。共有スキーマをこのプロジェクトが勝手に確定させない。
@@ -194,7 +198,7 @@ async def ask_step(state: object, criteria: dict[str, str]):
     return result  # 実行前に別validatorで厳格検証する
 ```
 
-このコードはSDK利用法の**参考断片**。モデル選択・providerの実験条件・usageと費用の計測、deadline、secret redaction、429の扱いは実装側で補うこと。APIキーをREADMEに埋めない。CIは鍵なしのMock Transportで完結させる。
+このコードはSDK利用法の**参考断片**。実装ではproviderごとのcost estimate、global deadline、secret redaction、429の扱いを補う。`max_cost`はestimator予約額へのローカル上限であり、請求額との差に備えてprovider側のbudget capも設定する。APIキーをREADMEに埋めない。CIは鍵なしのMock Transportで完結させる。
 
 ### 厳格な応答検証（Fail-closed）
 
@@ -219,7 +223,7 @@ Jev元実装の停止閾値（例：`goal_done > 0.85`）は互換性試験の�
 
 ### テキスト生成
 
-Jev自体は「どの入力欄か」を選ぶ。**何を入力するか**は別のTypedTextGeneratorで生成または明示値から取得する。LLMが生成した文字列の長さ・型・目的・秘密漏洩・許可対象を検証し、フォーム送信を勝手に連鎖させない。API利用不能時に架空の個人情報などを推測入力しない。
+Jev自体は「どの入力欄か」を選ぶ。**何を入力するか**は別のTypedTextGeneratorで生成または明示値から取得する。LLMが生成した文字列の長さ・型・目的・秘密漏洩・許可対象を検証し、フォーム送信を勝手に連鎖させない。費用のあるgeneratorも`CostEstimator`を必須とし、estimate不明なら呼び出し前に停止する。API利用不能時に架空の個人情報などを推測入力しない。
 
 ## 6. Observe → Judge → Actの実行順
 
